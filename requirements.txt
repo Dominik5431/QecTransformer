@@ -1,0 +1,12 @@
+matplotlib~=3.8.1
+numpy~=1.26.1
+torch~=2.2.2
+scipy~=1.13.0
+stim~=1.14.dev1712965049
+torchvision~=0.17.2
+tqdm~=4.66.2
+setuptools~=69.5.1
+seaborn~=0.13.2
+PyMatching~=2.2.0
+sinter~=1.13.0
+torchinfo~=1.8.0
