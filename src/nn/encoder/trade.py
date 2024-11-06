@@ -55,11 +55,15 @@ class TraDE(Net):
         self.n_heads = kwargs['n_heads']
         self.dropout = kwargs['dropout']
         self.device = kwargs['device']
+        self.noise_model = kwargs['noise_model']
 
         self.fc_in = nn.Embedding(2, self.d_model)
         # self.positional_encoding = PositionalEncoding(self.d_model, self.d_model, self.device, self.dropout)
         # Learnable positional encoding produces better results than RNN based encoding
-        self.positional_encoding = LearnablePositionalEncoding(self.n - 1 + 2 * self.k, self.d_model)  # * distance removed
+        if self.noise_model == 'depolarizing':
+            self.positional_encoding = LearnablePositionalEncoding(self.n - 1 + 2 * self.k, self.d_model)
+        else:
+            self.positional_encoding = LearnablePositionalEncoding((self.n - 1) // 2 + self.k, self.d_model)
         encoder_layer = nn.TransformerEncoderLayer(d_model=self.d_model,
                                                    nhead=self.n_heads,
                                                    dim_feedforward=self.d_ff,
@@ -90,9 +94,7 @@ class TraDE(Net):
         x = self.encoder(x, mask=mask)
         x = self.fc_out(x)
         x = torch.sigmoid(x)
-        # scale logits
-        # x = x / 10
-        return x.squeeze(2)  # return logits
+        return x.squeeze(2)
 
     def log_prob(self, x):
         epsilon = 1e-9
@@ -104,22 +106,22 @@ class TraDE(Net):
 
         x_hat = self.forward(x_in)
         log_prob = torch.log(x_hat + epsilon) * x + torch.log(1 - x_hat + epsilon) * (1 - x)
-        return log_prob.sum(dim=1)
+
+        sequence_length = x.size(1)
+        return log_prob.sum(dim=1) / sequence_length
 
     def conditioned_forward(self, syndrome, dtype=torch.int, k=1):
         with torch.no_grad():
             s = syndrome.size(1)
-            # x = torch.zeros(syndrome.size(0), s + 2 * self.k, dtype=dtype).to(self.device)
-            # x[:, :s] = syndrome
-            # x[:, s:] = torch.rand(syndrome.size(0), 2 * self.k).to(self.device)
-            logical = torch.zeros(syndrome.size(0), k).to(self.device)  # 2 * * distance removed
+            l = 2*k if self.noise_model == 'depolarizing' else 1*k
+            logical = torch.zeros(syndrome.size(0), l).to(self.device)  # 2 * * distance removed
 
             # Append start token
             start_token_value = 1
             start_token = torch.full((syndrome.size(0), 1), start_token_value, dtype=torch.long, device=self.device)
             syndrome = torch.cat((start_token, syndrome), dim=1).to(self.device)
 
-            for i in range(k):  # 2 * * distance removed
+            for i in range(l):  # 2 * * distance removed
                 conditional = self.forward(syndrome)
                 # conditional = torch.sigmoid(logits)
                 if len(conditional.shape) < 2:
@@ -130,6 +132,23 @@ class TraDE(Net):
                 # x[:, s + i] = torch.floor(2 * conditional[:, s + i])
                 # x[:, s + i] = conditional[:, s + i]
         return logical
+
+    def sample_density(self, num_samples=100):
+        if self.noise_model == 'bitflip':
+            sequence_length = (self.n - 1) // 2 + self.k
+        else:
+            sequence_length = (self.n - 1) + 2 * self.k
+        samples = torch.zeros(num_samples, sequence_length, dtype=torch.long).to(self.device)
+        with torch.no_grad():
+            for i in torch.arange(sequence_length):
+                probs = self.forward(samples)
+                p_i = probs[:, i]
+
+                next_token = torch.bernoulli(p_i)
+
+                samples[:, i] = next_token
+
+        return samples
 
 
 if __name__ == '__main__':

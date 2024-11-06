@@ -1,8 +1,12 @@
+import os
+
 import numpy as np
 import torch
 import sys
 import time
 import itertools
+from numba import njit
+from numba_progress import ProgressBar
 
 from matplotlib import pyplot as plt
 from tqdm import tqdm
@@ -93,71 +97,6 @@ def PCM(g_stabilizer):
     PCM = torch.zeros_like(M)
     PCM[:, :n], PCM[:, n:] = M[:, n:], M[:, :n]
     return PCM
-
-
-def get_pr(d: int, noises):
-    """
-
-    :param d: distance of the code
-    :param noises: list of noise values for which we calculate the participation ratio
-    :return: participation ratio
-    """
-    # generate all possible error configurations
-    errs = torch.as_tensor(list(map(list, itertools.product([0, 1, 2, 3], repeat=d ** 2))))
-    info = read_code(d=d, k=1, seed=0, c_type='rsur')
-    Code = Loading_code(info)
-
-    # e1 = Code.pure_es
-    # for i in range(Code.m):
-    #     conf = commute(e1[i], e1)
-    #     idx = conf.nonzero().squeeze().to('cpu')
-    #     sta = Code.g_stabilizer[idx]
-    #     e1[i] = opts_prod(torch.vstack([e1[i], sta]))
-
-    # g = torch.vstack([e1, Code.logical_opt, Code.g_stabilizer]
-    # get the syndrome for each error
-    syndromes = list(commute(errs, Code.g_stabilizer))
-    # get the logical operator for each error
-    log_confs = list(commute(errs, Code.logical_opt))
-    errs = list(errs)
-    # Here, the pr for each different noise value is stored
-    result = torch.zeros(len(noises))
-    test = torch.zeros(len(noises))
-
-    # get a list of all occurring syndromes
-    possible_syndromes = list({tuple(tensor.tolist()): tensor for tensor in syndromes}.values())
-    for s in tqdm(possible_syndromes):
-        # print('neu')
-        # list of all errors and logical operators whose syndrome is equal to s
-        errors_for_syndrome = [(error, logical) for syndrome, error, logical in zip(syndromes, errs, log_confs) if
-                               torch.equal(s, syndrome)]
-        # calculate probability of the syndrome
-        p_s = torch.sum(torch.stack([p_error(error, noises) for error, _ in errors_for_syndrome]), dim=0)
-        # calculate probability of the logical operator given the syndrome
-        p_lx = torch.sum(torch.stack([p_error(error, noises) for error, logical in errors_for_syndrome if
-                                      torch.equal(logical, torch.tensor([0, 1], device='cpu'))]), dim=0) / p_s
-        p_l1 = torch.sum(torch.stack([p_error(error, noises) for error, logical in errors_for_syndrome if
-                                      torch.equal(logical, torch.tensor([0, 0], device='cpu'))]), dim=0) / p_s
-        p_lz = torch.sum(torch.stack([p_error(error, noises) for error, logical in errors_for_syndrome if
-                                      torch.equal(logical, torch.tensor([1, 0], device='cpu'))]), dim=0) / p_s
-        p_ly = torch.sum(torch.stack([p_error(error, noises) for error, logical in errors_for_syndrome if
-                                      torch.equal(logical, torch.tensor([1, 1], device='cpu'))]), dim=0) / p_s
-
-        # print(p_s)
-        # print(p_lx + p_l1)
-        # print(p_lx)
-        # print(p_l1)
-        # calculate participation ratio
-        result += p_s * (p_lx ** 2 + p_l1 ** 2 + p_ly ** 2 + p_lz ** 2)
-        test += p_s
-    print('total', test)
-    # return participation ratio
-    return result
-
-
-def p_error(error, p):
-    res = ((p/3) ** torch.sum(error > 0) * (1 - p) ** (len(error) - torch.sum(error > 0)))
-    return res
 
 
 def rep(input, dtype=torch.float32, device='cpu'):
@@ -265,11 +204,196 @@ def commute(a, b, intype=('nor', 'nor'), dtype=torch.float32, device='cpu'):
     return ((bin_a @ gamma @ bin_b.T) % 2).squeeze()
 
 
-if __name__ == '__main__':
-    noises = torch.arange(0, 1, 0.01)
-    for d in [3]:
-        pr = get_pr(d=d, noises=noises)
-        plt.plot(noises, pr, label='d={}'.format(d))
-    plt.legend()
-    plt.show()
+@njit
+def compute_syndrome(ex, ez, ps, stabilizer, logical, gamma):
+    ys = ex * ez
+    xs = ex - ys
+    zs = ez - ys
+    total = ys + xs + zs
 
+    pe = ((ps / 3) ** np.sum(total > 0) * (1 - ps) ** (len(ex) - np.sum(total > 0)))
+
+    e = np.concatenate((ex, ez)).reshape(1, -1).astype(np.float32)
+
+    s = ((stabilizer @ gamma @ e.T) % 2).reshape(-1, 1)
+    l = ((logical @ gamma @ e.T) % 2).reshape(-1, 1)
+
+    return s, l, pe
+
+
+@njit
+def inner_loop(error_z, ex, ps, stabilizer, logical, gamma, syndrome_p, logical_p):
+    for ez in error_z:
+        s, l, pe = compute_syndrome(ex, error_z, ps, stabilizer, logical, gamma)
+
+        s_decimal = binary_to_decimal_array(s)
+        l_decimal = binary_to_decimal_array(l)
+
+        syndrome_p[s_decimal] += pe
+        logical_p[s_decimal, l_decimal] += pe
+
+
+@njit
+def decimal_to_binary_array(decimals, bit_width):
+    # Prepare the output array
+    n = len(decimals)
+    binary_array = np.zeros((n, bit_width), dtype=np.uint8)
+
+    # Loop through each bit position
+    for j in range(bit_width):
+        # Create a bit mask for the j-th bit
+        mask = 1 << (bit_width - j - 1)
+
+        # Extract the j-th bit across all decimal values and store it
+        binary_array[:, j] = (decimals & mask) >> (bit_width - j - 1)
+
+    return binary_array
+
+
+@njit
+def binary_to_decimal_array(binary):
+    # Get the number of binary numbers and their bit width
+    binary = binary.ravel().astype(np.uint8)
+    decimal_value = 0  # Initialize as an integer
+    for j in np.arange(binary.size):
+        decimal_value |= binary[j] << (binary.size - j - 1)
+    return decimal_value
+
+
+@njit
+def compute_syndrome_batch(ex, error_z_batch, ps, stabilizer, logical, gamma, mode):
+    batch_size, ex_length = error_z_batch.shape
+
+    # Broadcasting `ex` to match the batch size
+    ex_expanded = ex[np.newaxis, :]
+    ex_expanded = np.broadcast_to(ex_expanded, (batch_size, ex_length))
+
+    # Forming e_batch
+    e_batch = np.hstack((ex_expanded, error_z_batch)).astype(np.float32)
+
+    # Compute ys, xs, zs, total in one go
+    ys = ex_expanded * error_z_batch
+    xs = ex_expanded - ys
+    zs = error_z_batch - ys
+    total = ys + xs + zs
+
+    # Active counts
+    active_counts = np.sum(total > 0, axis=1)
+
+    # Prepare ps and pe
+    len_ps = len(ps)
+    pe = np.empty((len_ps, batch_size), dtype=np.float32)
+
+    if mode == 'depolarizing':
+        for i in range(len_ps):
+            pe[i, :] = ((ps[i] / 3) ** active_counts) * ((1 - ps[i]) ** (len(ex) - active_counts))
+    else:
+        for i in range(len_ps):
+            pe[i, :] = ((ps[i]) ** active_counts) * ((1 - ps[i]) ** (len(ex) - active_counts))
+
+    # Compute s and l
+    s = (stabilizer @ (gamma @ e_batch.T)) % 2
+    l = (logical @ (gamma @ e_batch.T)) % 2
+
+    return s.T, l.T, pe
+
+
+@njit
+def inner_loop_vectorized(error_z, ex, ps, stabilizer, logical, gamma, syndrome_p, logical_p, mode):
+    # Compute `s`, `l`, and `pe` for the batch of `error_z`
+    s_batch, l_batch, pe_batch = compute_syndrome_batch(ex, error_z, ps, stabilizer, logical, gamma, mode)
+
+    # Convert `s_batch` and `l_batch` to decimal indices
+    for i in np.arange(s_batch.shape[0]):
+        s_decimal = binary_to_decimal_array(s_batch[i])
+        l_decimal = binary_to_decimal_array(l_batch[i])
+
+        # Accumulate probabilities in `syndrome_p` and `logical_p`
+        syndrome_p[s_decimal] += pe_batch[:, i]
+        logical_p[s_decimal, l_decimal] += pe_batch[:, i]
+
+
+@njit
+def normalize_p(logical_p, syndrome_p, ps, s):
+    for l in np.arange(np.shape(logical_p)[1]):
+        for n in np.arange(len(ps)):
+            if np.abs(syndrome_p[s, n]) < 1e-10:
+                continue
+            logical_p[s, l, n] /= syndrome_p[s, n]
+
+
+# @njit(nogil=True)
+def get_pr(d: int, ps, stabilizer, logical, qubits: int, mode='depolarizing'):
+    errs = np.arange(2 ** (qubits))
+    syndrome_p = np.zeros((2 ** (qubits - 1), len(ps)))
+    logical_p = np.zeros((2 ** (qubits - 1), 4, len(ps)))
+
+    error_x = decimal_to_binary_array(errs, qubits)
+    if mode == 'depolarizing':
+        error_z = error_x.copy()
+    else:
+        error_z = np.zeros((1, qubits)).astype(np.float32)
+
+    identity = np.eye(qubits)
+    zero = np.zeros_like(identity)
+
+    gamma = np.vstack((np.hstack((zero, identity)), np.hstack((identity, zero)))).astype(np.float32)
+    stabilizer = stabilizer.astype(np.float32)
+    logical = logical.astype(np.float32)
+
+    # Use tqdm here for tracking progress
+    for ex in tqdm(error_x):
+        inner_loop_vectorized(error_z, ex, ps, stabilizer, logical, gamma, syndrome_p, logical_p, mode)
+        # progress.update(1)
+
+    for s in np.arange(np.shape(logical_p)[0]):
+        normalize_p(logical_p, syndrome_p, ps, s)
+
+    # assert np.sum(np.abs(np.sum(logical_p, axis=1) - np.ones((2 ** (qubits - 1), len(ps))))) < 1e-3
+    # assert np.sum(np.abs(np.sum(syndrome_p, axis=0) - np.ones(len(ps)))) < 1e-3
+    epsilon = 1e-12
+    ci = np.log(2) + np.sum(syndrome_p * np.sum((logical_p) * np.log(logical_p + epsilon), axis=1), axis=0)
+    entropy = - np.sum(syndrome_p * np.sum((logical_p) * np.log(logical_p + epsilon), axis=1), axis=0)
+    pr = np.sum(syndrome_p * np.sum((logical_p) ** 2, axis=1), axis=0)
+    var = np.sum(syndrome_p * np.var(logical_p[:, [0, 2], :], axis=1, ddof=0), axis=0)
+    # dif = 4/3 * pr - 1/3 - (ci/(2 * np.log(2)) + 0.5)
+    dif = np.sum(
+        syndrome_p * np.sum(4 / 3 * logical_p ** 2 - 1 / (2 * np.log(2)) * logical_p * np.log(logical_p + epsilon),
+                            axis=1), axis=0) - 4 / 3
+    # result = np.sum(np.sum((logical_p) ** 2, axis=1), axis=0)
+    # print(4 / 3 * logical_p - 1 / (2 * np.log(2)) * np.log(logical_p + epsilon) - 4 / 3)
+    return pr, ci, dif
+
+
+if __name__ == '__main__':
+
+    # noises = np.arange(0.08, 0.12, 0.001)
+    epsilon = 1e-12
+    noises = np.arange(0., 0.4, 0.01)
+    # entr = - noises * np.log(noises + epsilon) - (1 - noises) * np.log(1 - noises)
+    # plt.plot(noises, (- entr + np.log(2)) / np.log(2), label='d=1')
+    for d in [3]:
+        g_stabilizer = np.loadtxt('code/stabilizer_' + 'steane' + '_d{}_k{}'.format(d, 1))
+        logical_opt = np.loadtxt('code/logical_' + 'steane' + '_d{}_k{}'.format(d, 1))
+        n = 7 if d == 3 else 19
+
+        pr, ci, dif = get_pr(d=d, ps=noises, stabilizer=g_stabilizer, logical=logical_opt, qubits=n, mode='depolarizing')
+        # np.savetxt('analytical_d{}'.format(d), pr)
+        plt.plot(noises, ci / (2 * np.log(2)) + 0.5, label='d={}_entr'.format(d))
+        # plt.plot(noises, - entropy, label='d={}_entr'.format(d))
+        plt.plot(noises, (pr - 0.25) / 0.75, label='d={}_pr'.format(d))
+        plt.plot(noises, dif, label='d={}_dif'.format(d))
+        # plt.plot(noises, 4 * var, label='d={}_var'.format(d))
+    '''
+    for d in [3, 5]:
+        g_stabilizer = np.loadtxt('code/stabilizer_' + 'rsur' + '_d{}_k{}'.format(d, 1))
+        logical_opt = np.loadtxt('code/logical_' + 'rsur' + '_d{}_k{}'.format(d, 1))
+        pr = get_pr(d=d, ps=noises, stabilizer=g_stabilizer, logical=logical_opt, qubits=d**2)
+        plt.plot(noises, pr, label='d={}_surface'.format(d))
+    '''
+    plt.vlines(0.109, 0, 1, linestyles='dashed', color='red', label='threshold')
+    plt.legend()
+    plt.xlabel('noise probability p')
+    plt.ylabel('participation ratio')
+    # plt.ylim(0.45, 0.65)
+    plt.show()

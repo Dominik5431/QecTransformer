@@ -2,13 +2,14 @@ import sys
 
 import torch
 import numpy as np
+from numba_progress import ProgressBar
 from tqdm import tqdm
 
 from src.loops import training_loop, eval_log_op
 from src.nn.encoder.trade import TraDE
 from src.utils import make_optimizer, simple_bootstrap, get_pr
 
-from src.data.dataset import DepolarizingSurfaceData
+from src.data.dataset import DepolarizingSurfaceData, BitflipSurfaceData
 import matplotlib.pyplot as plt
 
 # log
@@ -20,6 +21,12 @@ import matplotlib.pyplot as plt
 # r9: try everything as in qecGPT to find where error is
 # r10: start token appending in forward --> now correct loss function
 # r11: new encoding, try to output joint probability of both logical operators
+
+# t1: try to avoid overfitting and see crossing, compare with analytical expectation
+# t2: 1000 epochs
+# t3_ bitflip noise
+# t4: bitflip on cluster
+# t7: back to depolarizing
 
 torch.set_printoptions(precision=3, sci_mode=False)
 
@@ -36,10 +43,10 @@ noise_vals = [0.02, 0.05, 0.08, 0.11, 0.14, 0.16, 0.18, 0.20, 0.22, 0.24, 0.27, 
 distances = [3, 5, 7, 9]
 
 # s = sys.argv[1]
-s = 9
+s = 11
 s = int(s)
 
-noises = [noise_vals[s % 15]]
+noise = noise_vals[s % 15]
 distance = distances[s // 15]
 
 # noises = [0.11]
@@ -54,67 +61,83 @@ distance = distances[s // 15]
 # noises = [0.1]
 
 lr = 1e-3
-num_epochs = 500
+num_epochs = 1000
 batch_size = 100
-data_size = 50000
-load_data = True
+data_size = 500 * distance ** 2
 device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
 
-
-def get_d_model(dis):
-    match dis:
-        case 7:
-            return 512
-        case 9:
-            return 512
-        case _:
-            return 256
-
+iteration = 't7'
+mode = 'depolarizing'
 
 trade_dict = {
     'n': distance ** 2,
     'k': 1,
     'distance': distance,
-    'd_model': get_d_model(distance),
-    'd_ff': get_d_model(distance),
+    'd_model': 100 * distance,
+    'd_ff': 100 * distance,
     'n_layers': 2,
     'n_heads': 4,
     'device': device,
     'dropout': 0.2,
     'vocab_size': 2,
-    'max_seq_len': 50,
+    'max_seq_len': distance ** 2 + 1,
+    'noise_model': mode
 }
 
+model = TraDE(name=iteration + '_' + str(distance) + '_' + str(noise), **trade_dict).load()
+
+for name, param in model.named_parameters():
+    print(name, param.size())
+
+
 if task == 1:
-    (DepolarizingSurfaceData(distance=distance,
-                             noises=noises,
-                             name='f3_' + str(distance) + '_' + str(noises[0]),
-                             load=False,
-                             device=device)
-     .initialize(data_size)
-     .save())
+    if mode == 'bitflip':
+        (BitflipSurfaceData(distance=distance,
+                            noise=noise,
+                            name=iteration + '_' + str(distance) + '_' + str(noise),
+                            load=False,
+                            device=device)
+         .initialize(data_size)
+         .save())
+    else:
+        (DepolarizingSurfaceData(distance=distance,
+                                 noise=noise,
+                                 name=iteration + '_' + str(distance) + '_' + str(noise),
+                                 load=False,
+                                 device=device)
+         .initialize(data_size)
+         .save())
     # elif task == 2:
-    data = (DepolarizingSurfaceData(distance=distance,
-                                    noises=noises,
-                                    name='f3_' + str(distance) + '_' + str(noises[0]),
-                                    load=True,
-                                    device=device)
-            .initialize(data_size))
+    if mode == 'bitflip':
+        data = (BitflipSurfaceData(distance=distance,
+                                   noise=noise,
+                                   name=iteration + '_' + str(distance) + '_' + str(noise),
+                                   load=True,
+                                   device=device)
+                .initialize(data_size))
+    else:
+        data = (DepolarizingSurfaceData(distance=distance,
+                                        noise=noise,
+                                        name=iteration + '_' + str(distance) + '_' + str(noise),
+                                        load=True,
+                                        device=device)
+                .initialize(data_size))
     train, val = data.get_train_val_data()  # default ratio 80/20
-    model = TraDE(name='f2_' + str(distance) + '_' + str(noises[0]), **trade_dict).load()
-    model = training_loop(model, train, val, make_optimizer(lr), device, epochs=num_epochs, batch_size=batch_size)
-# elif task == 3:
+    model = TraDE(name=iteration + '_' + str(distance) + '_' + str(noise), **trade_dict)  # .load()
+    model = training_loop(model, train, val, make_optimizer(lr), device, epochs=num_epochs, batch_size=batch_size,
+                          mode=mode)
+elif task == 3:
     # Get probabilities for logical operators for each noise value in the form: dict{noise: p(1), p(X), p(Z), p(Y)}
-    # model = TraDE(name='f3_' + str(distance) + '_' + str(noises[0]), **trade_dict).load()
-    res_data = {noises[0]: eval_log_op(model, distance, noises, device)}
+    model = TraDE(name=iteration + '_' + str(distance) + '_' + str(noise), **trade_dict).load()
+    res_data = {noise: eval_log_op(model, distance, noise, device, mode=mode)}
     # model = TraDE(name='f2_' + str(distance) + '_' + str(noises[0]), **trade_dict).load()
     # for name, param in model.named_parameters():
     #     print(name, param)
-    result = {noises[0]: simple_bootstrap(res_data[noises[0]])}
-    torch.save(res_data, "data/data_{0}_{1}_{2}.pt".format('f3', distance, noises[0]))
-    torch.save(result, "data/result_{0}_{1}_{2}.pt".format('f3', distance, noises[0]))
+    result = {noise: simple_bootstrap(res_data[noise])}
+    torch.save(res_data, "data/data_{0}_{1}_{2}.pt".format(iteration, distance, noise))
+    torch.save(result, "data/result_{0}_{1}_{2}.pt".format(iteration, distance, noise))
 elif task == 4:
-    z = torch.load("data/result_{0}_{1}_{2}.pt".format('f3', distance, noises[0]))
+    z = torch.load("data/result_{0}_{1}_{2}.pt".format(iteration, distance, noise))
     n = list(z.keys())  # noises
     pr = list(z.values())  # list of tuples containing mean, uplimit, lowlimit
     # get here median, upper error bar, lower error bar
@@ -128,23 +151,31 @@ elif task == 4:
 
     # noises = np.array(list(map(lambda x: 4 / (np.log(3 * (1 - x) / x)), noises)))
     # plt.vlines(1.565, 0, 6, colors='red', linestyles='dashed')
+
+    noises = torch.arange(0, 0.75, 0.01)
+    for d in [5]:
+        pr = get_pr(d, noises)
+        plt.plot(noises, pr, label='d={}'.format(d))
+    ax.set_xlabel('noise probability p')
+    ax.set_ylabel('participation ratio')
+
     ax.legend()
     plt.show()
 elif task == 100:  # merging dictionaries
     for dist in distances:
         super_dict = {}
-        for i, noise in enumerate(noise_vals):
+        for i, n in enumerate(noise_vals):
             try:
-                d = torch.load("data/result_{0}_{1}_{2}.pt".format('f4', dist, noise))
+                d = torch.load("data/result_{0}_{1}_{2}.pt".format(iteration, dist, n))
             except FileNotFoundError:
                 d = {}
             for k, v in d.items():
                 super_dict[k] = v
-        torch.save(super_dict, "data/result_{0}_{1}.pt".format('f4', dist))
+        torch.save(super_dict, "data/result_{0}_{1}.pt".format(iteration, dist))
 elif task == 101:  # plot for different distances
     fig, ax = plt.subplots()
     for i, dist in enumerate(distances):
-        dict = torch.load("data/result_{0}_{1}.pt".format('f4', dist))
+        dict = torch.load("data/result_{0}_{1}.pt".format(iteration, dist))
         n = list(dict.keys())  # noises
         pr = list(dict.values())  # list of tuples containing mean, uplimit, lowlimit
         # get here median, upper error bar, lower error bar
@@ -154,16 +185,19 @@ elif task == 101:  # plot for different distances
 
         # plotting
         ax.errorbar(n, pr_m, yerr=(pr_d, pr_u), marker='o', markersize=4, linestyle='dotted', label='d={}'.format(dist))
+    # plt.plot(np.arange(0, 0.4, 0.01), np.arange(0, 0.4, 0.01)**2 + (1 - np.arange(0, 0.4, 0.01))**2, label='physical qubit')
     # plt.xlabel('noise probability p')
     # plt.ylabel('participation ratio')
     # plt.legend()
     # plt.show()
-# elif task == 102:  # find analytical expression for participation ratio
+    # elif task == 102:  # find analytical expression for participation ratio
     # first for bit-flip noise
     # fig, ax = plt.subplots()
-    noises = torch.arange(0, 0.4, 0.01)
-    for d in [3]:
-        pr = get_pr(d, noises)
+    noises = np.arange(0.01, 0.4, 0.01)
+    for d in [3]:  # , 5]:
+        g_stabilizer = np.loadtxt('code/stabilizer_' + 'rsur' + '_d{}_k{}'.format(d, 1))
+        logical_opt = np.loadtxt('code/logical_' + 'rsur' + '_d{}_k{}'.format(d, 1))
+        pr, entr, var = get_pr(d, noises, g_stabilizer, logical_opt, d ** 2)
         plt.plot(noises, pr, label='d={}'.format(d))
     ax.set_xlabel('noise probability p')
     ax.set_ylabel('participation ratio')
