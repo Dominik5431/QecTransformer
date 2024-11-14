@@ -362,6 +362,8 @@ def get_pr(d: int, ps, stabilizer, logical, qubits: int, mode='depolarizing'):
                             axis=1), axis=0) - 4 / 3
     # result = np.sum(np.sum((logical_p) ** 2, axis=1), axis=0)
     # print(4 / 3 * logical_p - 1 / (2 * np.log(2)) * np.log(logical_p + epsilon) - 4 / 3)
+    print(logical_p[2**6, :, 11])
+    print(syndrome_p[2**6, 11])
     return pr, ci, dif
 
 
@@ -372,26 +374,30 @@ if __name__ == '__main__':
     noises = np.arange(0., 0.4, 0.01)
     # entr = - noises * np.log(noises + epsilon) - (1 - noises) * np.log(1 - noises)
     # plt.plot(noises, (- entr + np.log(2)) / np.log(2), label='d=1')
+    '''
     for d in [3]:
         g_stabilizer = np.loadtxt('code/stabilizer_' + 'steane' + '_d{}_k{}'.format(d, 1))
+        print(g_stabilizer)
         logical_opt = np.loadtxt('code/logical_' + 'steane' + '_d{}_k{}'.format(d, 1))
         n = 7 if d == 3 else 19
-
+        # logical_opt = np.array([[0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1], [1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0]])
         pr, ci, dif = get_pr(d=d, ps=noises, stabilizer=g_stabilizer, logical=logical_opt, qubits=n, mode='depolarizing')
         # np.savetxt('analytical_d{}'.format(d), pr)
-        plt.plot(noises, ci / (2 * np.log(2)) + 0.5, label='d={}_entr'.format(d))
-        # plt.plot(noises, - entropy, label='d={}_entr'.format(d))
-        plt.plot(noises, (pr - 0.25) / 0.75, label='d={}_pr'.format(d))
-        plt.plot(noises, dif, label='d={}_dif'.format(d))
+        # plt.plot(noises, ci / (2 * np.log(2)) + 0.5, label='d={}_entr'.format(d))
+        # plt.plot(noises, entropy, label='d={}_entr'.format(d))
+        plt.plot(noises, pr, label='d={}_pr'.format(d))
+        # plt.plot(noises, dif, label='d={}_dif'.format(d))
         # plt.plot(noises, 4 * var, label='d={}_var'.format(d))
     '''
-    for d in [3, 5]:
+    for d in [3]:
         g_stabilizer = np.loadtxt('code/stabilizer_' + 'rsur' + '_d{}_k{}'.format(d, 1))
+        print(g_stabilizer)
         logical_opt = np.loadtxt('code/logical_' + 'rsur' + '_d{}_k{}'.format(d, 1))
-        pr = get_pr(d=d, ps=noises, stabilizer=g_stabilizer, logical=logical_opt, qubits=d**2)
+        pr, ci, dif = get_pr(d=d, ps=noises, stabilizer=g_stabilizer, logical=logical_opt, qubits=d**2,
+                             mode='depolarizing')
         plt.plot(noises, pr, label='d={}_surface'.format(d))
-    '''
-    plt.vlines(0.109, 0, 1, linestyles='dashed', color='red', label='threshold')
+
+    plt.vlines(0.109, 0.5, 1, linestyles='dashed', color='red', label='threshold')
     plt.legend()
     plt.xlabel('noise probability p')
     plt.ylabel('participation ratio')

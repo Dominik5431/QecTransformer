@@ -19,6 +19,9 @@ class Net(nn.Module):
         self.load_state_dict(torch.load("data/net_{0}.pt".format(self.name)))
         return self
 
+    def load_smaller_d(self, name: str):
+        self.load_state_dict(torch.load("data/net_{0}.pt".format(name)))
+
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, hidden_dim, dev, dropout=0.1):
@@ -43,6 +46,70 @@ class LearnablePositionalEncoding(nn.Module):
         return x + self.positional_embedding(torch.arange(x.size(1), device=x.device))
 
 
+class FixedPositionalEncoding(nn.Module):
+    def __init__(self, distance: int, d_model, device):
+        super().__init__()
+        self.distance = distance
+        self.device = device
+
+        d_model_half = d_model // 2
+
+        # Create row and column position vector
+        height = 2 * distance + 1
+        width = height
+
+        row_pos = torch.arange(height, dtype=torch.float32, device=self.device).unsqueeze(1)
+        col_pos = torch.arange(width, dtype=torch.float32, device=self.device).unsqueeze(1)
+
+        row_enc = torch.zeros(height, d_model_half, device=self.device)
+        col_enc = torch.zeros(width, d_model_half, device=self.device)
+        div_term = torch.exp(torch.arange(0, d_model_half, 2, device=self.device) * -(math.log(10000) / d_model_half))
+
+        row_enc[:, 0::2] = torch.sin(div_term * row_pos)
+        row_enc[:, 1::2] = torch.cos(div_term * row_pos)
+        col_enc[:, 0::2] = torch.sin(div_term * col_pos)
+        col_enc[:, 1::2] = torch.cos(div_term * col_pos)
+
+        grid_enc = torch.zeros(height, width, d_model, device=self.device)
+        grid_enc[:, :, :d_model_half] = row_enc.unsqueeze(1).expand(-1, width, -1)
+        grid_enc[:, :, d_model_half:] = col_enc.unsqueeze(1).expand(-1, width, -1)
+
+        self.pos_enc = torch.zeros(distance**2 + 1, d_model, device=self.device)  # here k when looking into codes that encode several log. qubits
+
+        z_idx = 0
+        x_idx = (distance**2 - 1) // 2
+        for x in range(2, 2*distance, 4):
+            self.pos_enc[z_idx] = grid_enc[x, 0]
+            z_idx += 1
+
+        for y in range(2, 2*distance, 2):
+            yi = y % 4
+            xs = range(yi, 2 * distance + yi // 2, 2)
+            for i, x in enumerate(xs):
+                if i % 2 == 0:
+                    self.pos_enc[z_idx] = grid_enc[x, y]
+                    z_idx += 1
+                elif i % 2 == 1:
+                    self.pos_enc[x_idx] = grid_enc[x, y]
+                    x_idx += 1
+
+        for x in range(4, 2*distance, 4):
+            self.pos_enc[x_idx] = grid_enc[x, 2*distance]
+            x_idx += 1
+
+        enc_log = torch.zeros(d_model, device=self.device)
+        for x in range(distance):
+            for y in range(distance):
+                enc_log += grid_enc[2 * x + 1, 2 * y + 1]
+        enc_log = enc_log/(distance**2)
+        self.pos_enc[-2] = enc_log
+        self.pos_enc[-1] = enc_log
+
+    def forward(self, x):
+        return x + self.pos_enc[torch.arange(x.size(1), device=x.device)]
+
+
+
 class TraDE(Net):
     def __init__(self, name, cluster=False, **kwargs):
         super(TraDE, self).__init__(name, cluster)
@@ -57,13 +124,19 @@ class TraDE(Net):
         self.device = kwargs['device']
         self.noise_model = kwargs['noise_model']
 
-        self.fc_in = nn.Embedding(2, self.d_model)
+        self.fc_in = nn.Embedding(3, self.d_model)
+
         # self.positional_encoding = PositionalEncoding(self.d_model, self.d_model, self.device, self.dropout)
+
         # Learnable positional encoding produces better results than RNN based encoding
+
         if self.noise_model == 'depolarizing':
             self.positional_encoding = LearnablePositionalEncoding(self.n - 1 + 2 * self.k, self.d_model)
         else:
             self.positional_encoding = LearnablePositionalEncoding((self.n - 1) // 2 + self.k, self.d_model)
+        '''
+        self.positional_encoding = FixedPositionalEncoding(self.distance, self.d_model, device=self.device)
+        '''
         encoder_layer = nn.TransformerEncoderLayer(d_model=self.d_model,
                                                    nhead=self.n_heads,
                                                    dim_feedforward=self.d_ff,
@@ -77,18 +150,30 @@ class TraDE(Net):
         x = self.positional_encoding(x)
 
         seq_len = x.size(1)
-        # mask = torch.tril(torch.ones(seq_len, seq_len), diagonal=0)
-        # mask = mask.masked_fill(mask == 0, float('-inf'))
-        # mask = mask.to(self.device)
-
-        mask = torch.ones(seq_len, seq_len)
+        max_len = self.n - 1 + 2 * self.k
+        '''
+        mask = torch.ones(max_len, max_len)
         mask = torch.tril(mask, diagonal=0)
 
         # For subsequent tokens, set diagonal values to 0 to prevent self-attention (except for the start token)
-        mask[1:, 1:] = torch.tril(torch.ones((seq_len - 1, seq_len - 1)), diagonal=-1)
+        mask[1:, 1:] = torch.tril(torch.ones((max_len - 1, max_len - 1)), diagonal=-1)
+        '''
 
+        mask = torch.ones(max_len - 2*self.k + 1, max_len - 2*self.k + 1)
+        mask_l = torch.tril(mask, diagonal=0)
+        mask_u = torch.triu(mask, diagonal=2)
+
+        mask = torch.zeros(max_len, max_len)
+        mask[:-2 * self.k + 1, :-2 * self.k + 1] = (mask_l + mask_u)
+        for i in range(2 * self.k):
+            temp = torch.ones(1, max_len)
+            temp[0, max_len - 2 * self.k + 1 + i:] = torch.zeros(1, 2 * self.k - 1 - i)
+            mask[-2 * self.k + i, :] = temp
         mask = mask.masked_fill(mask == 0, float('-inf'))
         mask = mask.masked_fill(mask == 1, 0.0)
+
+        if seq_len < max_len:
+            mask = mask[:seq_len, :seq_len]
         mask = mask.to(self.device)
 
         x = self.encoder(x, mask=mask)
@@ -96,32 +181,38 @@ class TraDE(Net):
         x = torch.sigmoid(x)
         return x.squeeze(2)
 
-    def log_prob(self, x):
+    def log_prob(self, x, refinement: bool = False):
         epsilon = 1e-9
 
         # Append start token
-        start_token_value = 1
+        start_token_value = 2
         start_token = torch.full((x.size(0), 1), start_token_value, dtype=torch.long, device=self.device)
         x_in = torch.cat((start_token, x[:, :-1]), dim=1).to(self.device)
 
         x_hat = self.forward(x_in)
-        log_prob = torch.log(x_hat + epsilon) * x + torch.log(1 - x_hat + epsilon) * (1 - x)
+        # print(x_hat[0])
+        # print(x_hat[1])
+        # print(x_hat[2])
+
+        if refinement:
+            log_prob = torch.log(x_hat[:-2*self.k] + epsilon) * x[:-2*self.k] + torch.log(1 - x_hat[:-2*self.k] + epsilon) * (1 - x[:-2*self.k])
+        else:
+            log_prob = torch.log(x_hat + epsilon) * x + torch.log(1 - x_hat + epsilon) * (1 - x)
 
         sequence_length = x.size(1)
         return log_prob.sum(dim=1) / sequence_length
 
     def conditioned_forward(self, syndrome, dtype=torch.int, k=1):
         with torch.no_grad():
-            s = syndrome.size(1)
-            l = 2*k if self.noise_model == 'depolarizing' else 1*k
-            logical = torch.zeros(syndrome.size(0), l).to(self.device)  # 2 * * distance removed
+            logical = torch.zeros(syndrome.size(0), k).to(self.device)  # 2 * * distance removed
 
             # Append start token
-            start_token_value = 1
+            start_token_value = 2
             start_token = torch.full((syndrome.size(0), 1), start_token_value, dtype=torch.long, device=self.device)
             syndrome = torch.cat((start_token, syndrome), dim=1).to(self.device)
 
-            for i in range(l):  # 2 * * distance removed
+
+            for i in range(k):  # 2 * * distance removed
                 conditional = self.forward(syndrome)
                 # conditional = torch.sigmoid(logits)
                 if len(conditional.shape) < 2:
@@ -133,7 +224,7 @@ class TraDE(Net):
                 # x[:, s + i] = conditional[:, s + i]
         return logical
 
-    def sample_density(self, num_samples=100):
+    def sample_density(self, num_samples=1000):
         if self.noise_model == 'bitflip':
             sequence_length = (self.n - 1) // 2 + self.k
         else:
@@ -152,73 +243,4 @@ class TraDE(Net):
 
 
 if __name__ == '__main__':
-    d = 3
-    device = 'mps'
-    n = d ** 2
-    kwargs_dict = {
-        'n': n,
-        'k': 1,
-        'd_model': 2 * n,
-        'd_ff': 2 * n,
-        'n_layers': 2,
-        'n_heads': 2,
-        'device': device,
-        'dropout': 0.2,
-        'vocab_size': 2,
-        'max_seq_len': 50,
-    }
-
-    model = TraDE(name='test', **kwargs_dict).to(kwargs_dict['device'])
-
-    device = kwargs_dict['device']
-
-    batch_size = 32
-    seq_length = kwargs_dict['n'] + 5
-    x = torch.randint(low=0, high=2, size=(batch_size, seq_length)).to(device)  # input
-    y = torch.randint(low=0, high=2, size=(batch_size, seq_length)).to(device)  # target
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-    criterion = nn.CrossEntropyLoss()
-
-    model.train()
-    for epoch in range(5):
-        optimizer.zero_grad()
-        log_prob = model.log_prob(x)
-
-        loss = torch.mean((-log_prob), dim=0)
-        loss.backward()
-        optimizer.step()
-
-        print(f"Epoch {epoch + 1}, Loss: {loss.item()}")
-
-
-    def test(trade):
-        res = []
-        seq_len = kwargs_dict['n'] + 5
-        s0 = torch.ones(1, seq_len, requires_grad=True).to(kwargs_dict['device']).int()
-        s = F.relu(trade.fc_in(s0))
-        s = trade.positional_encoding(s)
-        s.retain_grad()
-        for k in range(trade.n):
-            mask = torch.tril(torch.ones(seq_len, seq_len), diagonal=0)
-            mask = mask.masked_fill(mask == 0, float('-inf'))
-            mask = mask.to(device)
-            x = trade.encoder(s, mask=mask)
-            x = torch.sigmoid(trade.fc_out(x)).squeeze(2)
-            loss = x[0, k]
-            loss.backward(retain_graph=True)
-            grad = s.grad.sum(2)
-            print(s.grad)
-            depends = (grad[0].cpu().numpy() != 0).astype(np.uint8)
-            depends_ix = list(np.where(depends)[0])
-            isok = k % trade.n not in depends_ix
-
-            res.append((len(depends_ix), k, depends_ix, isok))
-
-            # pretty print the dependencies
-            res.sort()
-        for nl, k, ix, isok in res:
-            print("output %2d depends on inputs: %70s : %s" % (k, ix, "OK" if isok else "NOTOK"))
-
-    T = TraDE(name='test', **kwargs_dict).to(kwargs_dict['device'])
-    test(T)
+    c = FixedPositionalEncoding(3, 128)

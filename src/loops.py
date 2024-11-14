@@ -33,14 +33,14 @@ def mmd_loss(x, y, sigma=1.0):
 
 
 def training_loop(model: nn.Module, dataset, val_set, init_optimizer: Callable[[Any], Optimizer], device, epochs=10,
-                  batch_size=100, l=1., mode='depolarizing'):
+                  batch_size=100, l=5., mode='depolarizing', refinement: bool = False, activate_scheduler: bool = True, include_mmd: bool = False,):
     train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=True)
     model.to(device)
     model.train()
 
     optimizer = init_optimizer((model.parameters()))
-    scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=10)
+    scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=5)
 
     best_loss = float("inf")
     previous_loss = float("inf")
@@ -55,12 +55,18 @@ def training_loop(model: nn.Module, dataset, val_set, init_optimizer: Callable[[
         num_batches = 0
         for (batch_idx, batch) in enumerate(tqdm(train_loader)):
             # add start token
-
             optimizer.zero_grad()
 
-            log_prob = model.log_prob(batch)
-            q_samples = model.sample_density()
-            mmd = mmd_loss(q_samples, batch)
+            # print(batch[0])
+            # print(batch[1])
+            # print(batch[2])
+
+            log_prob = model.log_prob(batch, refinement=refinement)
+            if include_mmd:
+                q_samples = model.sample_density()
+                mmd = mmd_loss(q_samples, batch)
+            else:
+                mmd = torch.tensor(0)
             # output = model(input)
             # print(torch.mean((-log_prob), dim=0), ' vs. ', l * mmd)
             loss = torch.mean((-log_prob), dim=0) + l * mmd
@@ -79,7 +85,7 @@ def training_loop(model: nn.Module, dataset, val_set, init_optimizer: Callable[[
             val_loss = 0
             num_batches = 0
             for (batch_idx, batch) in enumerate(val_loader):
-                log_prob = model.log_prob(batch)
+                log_prob = model.log_prob(batch, refinement=refinement)
                 # output = model(batch)
                 loss = torch.mean((-log_prob), dim=0)
                 # loss = criterion(output, batch.float())
@@ -95,9 +101,9 @@ def training_loop(model: nn.Module, dataset, val_set, init_optimizer: Callable[[
                 counter = 0
             previous_loss = val_loss
             print(f"Epoch {epoch + 1}, Validation Loss: {val_loss}")
-
-            scheduler.step(val_loss)
-            print(scheduler.get_last_lr())
+            if activate_scheduler:
+                scheduler.step(val_loss)
+                print(scheduler.get_last_lr())
             # if counter > 4:
             #     break
     return model
