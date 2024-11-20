@@ -12,10 +12,6 @@ from matplotlib import pyplot as plt
 from tqdm import tqdm
 
 
-def make_optimizer(lr):
-    return lambda params: torch.optim.Adam(params, lr=lr, weight_decay=1e-5)
-
-
 def progressbar(it, prefix="", size=60, out=sys.stdout):  # Python3.6+
     count = len(it)
     start = time.time()  # time estimate start

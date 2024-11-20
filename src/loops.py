@@ -33,7 +33,8 @@ def mmd_loss(x, y, sigma=1.0):
 
 
 def training_loop(model: nn.Module, dataset, val_set, init_optimizer: Callable[[Any], Optimizer], device, epochs=10,
-                  batch_size=100, l=5., mode='depolarizing', refinement: bool = False, activate_scheduler: bool = True, include_mmd: bool = False,):
+                  batch_size=100, l=5., mode='depolarizing', refinement: bool = True, activate_scheduler: bool = True,
+                  include_mmd: bool = False):
     train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=True)
     model.to(device)
@@ -56,10 +57,6 @@ def training_loop(model: nn.Module, dataset, val_set, init_optimizer: Callable[[
         for (batch_idx, batch) in enumerate(tqdm(train_loader)):
             # add start token
             optimizer.zero_grad()
-
-            # print(batch[0])
-            # print(batch[1])
-            # print(batch[2])
 
             log_prob = model.log_prob(batch, refinement=refinement)
             if include_mmd:

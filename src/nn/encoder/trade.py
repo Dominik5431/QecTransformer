@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch_eunn import EUNN, ModReLU
 
 
 class Net(nn.Module):
@@ -21,29 +22,6 @@ class Net(nn.Module):
 
     def load_smaller_d(self, name: str):
         self.load_state_dict(torch.load("data/net_{0}.pt".format(name)))
-
-
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, hidden_dim, dev, dropout=0.1):
-        super(PositionalEncoding, self).__init__()
-        self.hidden_dim = hidden_dim
-        self.dropout = nn.Dropout(p=dropout)
-
-        self.rnn = nn.GRU(input_size=d_model, hidden_size=hidden_dim, batch_first=True, bidirectional=False, device=dev)
-
-    def forward(self, x):
-        x = x + self.dropout(self.rnn(x)[0])
-        return x
-
-
-class LearnablePositionalEncoding(nn.Module):
-    def __init__(self, n, d_model):
-        # put n here as max_seq_len
-        super().__init__()
-        self.positional_embedding = nn.Embedding(n, d_model)
-
-    def forward(self, x):
-        return x + self.positional_embedding(torch.arange(x.size(1), device=x.device))
 
 
 class FixedPositionalEncoding(nn.Module):
@@ -74,15 +52,16 @@ class FixedPositionalEncoding(nn.Module):
         grid_enc[:, :, :d_model_half] = row_enc.unsqueeze(1).expand(-1, width, -1)
         grid_enc[:, :, d_model_half:] = col_enc.unsqueeze(1).expand(-1, width, -1)
 
-        self.pos_enc = torch.zeros(distance**2 + 1, d_model, device=self.device)  # here k when looking into codes that encode several log. qubits
+        self.pos_enc = torch.zeros(distance ** 2 + 1, d_model,
+                                   device=self.device)  # here k when looking into codes that encode several log. qubits
 
         z_idx = 0
-        x_idx = (distance**2 - 1) // 2
-        for x in range(2, 2*distance, 4):
+        x_idx = (distance ** 2 - 1) // 2
+        for x in range(2, 2 * distance, 4):
             self.pos_enc[z_idx] = grid_enc[x, 0]
             z_idx += 1
 
-        for y in range(2, 2*distance, 2):
+        for y in range(2, 2 * distance, 2):
             yi = y % 4
             xs = range(yi, 2 * distance + yi // 2, 2)
             for i, x in enumerate(xs):
@@ -93,21 +72,122 @@ class FixedPositionalEncoding(nn.Module):
                     self.pos_enc[x_idx] = grid_enc[x, y]
                     x_idx += 1
 
-        for x in range(4, 2*distance, 4):
-            self.pos_enc[x_idx] = grid_enc[x, 2*distance]
+        for x in range(4, 2 * distance, 4):
+            self.pos_enc[x_idx] = grid_enc[x, 2 * distance]
             x_idx += 1
 
         enc_log = torch.zeros(d_model, device=self.device)
         for x in range(distance):
             for y in range(distance):
                 enc_log += grid_enc[2 * x + 1, 2 * y + 1]
-        enc_log = enc_log/(distance**2)
+        enc_log = enc_log / (distance ** 2)
         self.pos_enc[-2] = enc_log
         self.pos_enc[-1] = enc_log
 
     def forward(self, x):
         return x + self.pos_enc[torch.arange(x.size(1), device=x.device)]
 
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, hidden_dim, dev, dropout=0.1):
+        super(PositionalEncoding, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.dropout = nn.Dropout(p=dropout)
+
+        self.rnn = nn.GRU(input_size=d_model, hidden_size=hidden_dim, batch_first=True, bidirectional=False, device=dev)
+
+    def forward(self, x):
+        x = x + self.dropout(self.rnn(x)[0])
+        return x
+
+
+class LearnablePositionalEncoding(nn.Module):
+    def __init__(self, n, d_model):
+        # put n here as max_seq_len
+        super().__init__()
+        self.positional_embedding = nn.Embedding(n, d_model)
+
+    def forward(self, x):
+        return x + self.positional_embedding(torch.arange(x.size(1), device=x.device))
+
+
+class UnitaryEmbedding(nn.Module):
+    def __init__(self, num_embeddings, embedding_dim):
+        super(UnitaryEmbedding, self).__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.unitary = EUNN(embedding_dim, num_embeddings)
+
+    def forward(self, x):
+        # Convert input indices to one-hot vectors
+        one_hot = torch.zeros(
+            x.size(0), self.num_embeddings, device=x.device
+        ).scatter_(1, x.unsqueeze(1), 1.0)
+        #one_hot.pad()
+        # Apply custom linear operation
+        return ModReLU(self.unitary(one_hot))
+
+
+class LearnablePositionalEncoding2D(nn.Module):
+    def __init__(self, d, d_model, device):  # have also k here, in case for codes with more than 1 logical qubits
+        super().__init__()
+        self.pos_x = nn.Embedding(2 * d + 1, d_model).to(device)
+        self.pos_y = nn.Embedding(2 * d + 1, d_model).to(device)
+        self.stab = nn.Embedding(2, d_model).to(device)
+
+        # self.pos_x = UnitaryEmbedding(2 * d + 2, d_model).to(device)
+        # self.pos_y = UnitaryEmbedding(2 * d + 2, d_model).to(device)
+        # self.stab = UnitaryEmbedding(2, d_model).to(device)
+
+        # self.pos_x.weight.needs_projection = True
+        # self.pos_y.weight.needs_projection = True
+        # self.stab.weight.needs_projection = True
+
+        self.token_to_x = torch.zeros(d**2 + 1, dtype=torch.long).to(device)
+        self.token_to_y = torch.zeros(d**2 + 1, dtype=torch.long).to(device)
+        self.token_to_stab = torch.zeros(d**2 + 1, dtype=torch.long).to(device)
+
+        z_idx = 0
+        x_idx = (d ** 2 - 1) // 2
+
+        self.token_to_stab[:x_idx] = 0
+        self.token_to_stab[x_idx:-2] = 1
+
+        for x in range(2, 2 * d, 4):
+            self.token_to_x[x_idx] = x
+            self.token_to_y[x_idx] = 0
+            x_idx += 1
+
+        for y in range(2, 2 * d, 2):
+            yi = y % 4
+            xs = range(yi, 2 * d + yi // 2, 2)
+            for i, x in enumerate(xs):
+                if i % 2 == 0:
+                    self.token_to_x[z_idx] = x
+                    self.token_to_y[z_idx] = y
+                    z_idx += 1
+                elif i % 2 == 1:
+                    self.token_to_x[x_idx] = x
+                    self.token_to_y[x_idx] = y
+                    x_idx += 1
+
+        for x in range(4, 2 * d, 4):
+            self.token_to_x[x_idx] = x
+            self.token_to_y[x_idx] = 2 * d
+            x_idx += 1
+
+        self.token_to_x[-2] = d
+        self.token_to_y[-2] = d
+        self.token_to_stab[-2] = 1  # X denoted as 1, Z as 0!
+
+        self.token_to_x[-1] = d
+        self.token_to_y[-1] = d
+        self.token_to_stab[-1] = 0
+
+    def forward(self, x):
+        return x + (self.pos_x(self.token_to_x[:x.size(1)]) +
+                    self.pos_y(self.token_to_y[:x.size(1)]) +
+                    self.stab(self.token_to_stab[:x.size(1)]))
 
 
 class TraDE(Net):
@@ -125,16 +205,18 @@ class TraDE(Net):
         self.noise_model = kwargs['noise_model']
 
         self.fc_in = nn.Embedding(3, self.d_model)
-
         # self.positional_encoding = PositionalEncoding(self.d_model, self.d_model, self.device, self.dropout)
 
-        # Learnable positional encoding produces better results than RNN based encoding
+        self.positional_encoding = LearnablePositionalEncoding2D(self.distance, self.d_model, device=self.device)
+        # self.l.weight.needs_projection = True
 
+        # Learnable positional encoding produces better results than RNN based encoding
+        '''
         if self.noise_model == 'depolarizing':
             self.positional_encoding = LearnablePositionalEncoding(self.n - 1 + 2 * self.k, self.d_model)
         else:
             self.positional_encoding = LearnablePositionalEncoding((self.n - 1) // 2 + self.k, self.d_model)
-        '''
+        
         self.positional_encoding = FixedPositionalEncoding(self.distance, self.d_model, device=self.device)
         '''
         encoder_layer = nn.TransformerEncoderLayer(d_model=self.d_model,
@@ -158,13 +240,9 @@ class TraDE(Net):
         # For subsequent tokens, set diagonal values to 0 to prevent self-attention (except for the start token)
         mask[1:, 1:] = torch.tril(torch.ones((max_len - 1, max_len - 1)), diagonal=-1)
         '''
-
-        mask = torch.ones(max_len - 2*self.k + 1, max_len - 2*self.k + 1)
-        mask_l = torch.tril(mask, diagonal=0)
-        mask_u = torch.triu(mask, diagonal=2)
-
         mask = torch.zeros(max_len, max_len)
-        mask[:-2 * self.k + 1, :-2 * self.k + 1] = (mask_l + mask_u)
+        mask[:max_len - 2 * self.k + 1, :max_len - 2 * self.k + 1] = torch.ones(max_len - 2 * self.k + 1,
+                                                                                max_len - 2 * self.k + 1)
         for i in range(2 * self.k):
             temp = torch.ones(1, max_len)
             temp[0, max_len - 2 * self.k + 1 + i:] = torch.zeros(1, 2 * self.k - 1 - i)
@@ -174,6 +252,7 @@ class TraDE(Net):
 
         if seq_len < max_len:
             mask = mask[:seq_len, :seq_len]
+
         mask = mask.to(self.device)
 
         x = self.encoder(x, mask=mask)
@@ -190,16 +269,14 @@ class TraDE(Net):
         x_in = torch.cat((start_token, x[:, :-1]), dim=1).to(self.device)
 
         x_hat = self.forward(x_in)
-        # print(x_hat[0])
-        # print(x_hat[1])
-        # print(x_hat[2])
 
         if refinement:
-            log_prob = torch.log(x_hat[:-2*self.k] + epsilon) * x[:-2*self.k] + torch.log(1 - x_hat[:-2*self.k] + epsilon) * (1 - x[:-2*self.k])
+            log_prob = torch.log(x_hat[:,-2 * self.k:] + epsilon) * x[:,-2 * self.k:] + torch.log(
+                1 - x_hat[:,-2 * self.k:] + epsilon) * (1 - x[:,-2 * self.k:])
+            sequence_length = 2
         else:
             log_prob = torch.log(x_hat + epsilon) * x + torch.log(1 - x_hat + epsilon) * (1 - x)
-
-        sequence_length = x.size(1)
+            sequence_length = x.size(1)
         return log_prob.sum(dim=1) / sequence_length
 
     def conditioned_forward(self, syndrome, dtype=torch.int, k=1):
@@ -210,7 +287,6 @@ class TraDE(Net):
             start_token_value = 2
             start_token = torch.full((syndrome.size(0), 1), start_token_value, dtype=torch.long, device=self.device)
             syndrome = torch.cat((start_token, syndrome), dim=1).to(self.device)
-
 
             for i in range(k):  # 2 * * distance removed
                 conditional = self.forward(syndrome)
