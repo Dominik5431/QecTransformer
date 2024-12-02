@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_eunn import EUNN, ModReLU
+from src.dem.circuit_to_graph import DEM_Graph
 
 
 class Net(nn.Module):
@@ -22,6 +23,57 @@ class Net(nn.Module):
 
     def load_smaller_d(self, name: str):
         self.load_state_dict(torch.load("data/net_{0}.pt".format(name)))
+
+
+class RelativeMultiheadAttention(nn.MultiheadAttention):
+    def __init__(self, embed_dim, num_heads, **kwargs):
+        super().__init__(embed_dim, num_heads, **kwargs)
+        self.relative_position_matrix = None
+
+    def set_relative_position_matrix(self, matrix):
+        """
+        Set the relative positional encoding matrix.
+        Args:
+            matrix (torch.Tensor): Shape [seq_len, seq_len]
+        """
+        self.relative_position_matrix = matrix
+
+    def forward(self, query, key, value, key_padding_mask=None, attn_mask=None):
+        # Standard attention computation
+        attn_output, attn_weights = super().forward(
+            query, key, value, key_padding_mask=key_padding_mask, attn_mask=attn_mask
+        )
+
+        if self.relative_position_matrix is not None:
+            seq_len = query.size(0)
+            # Use only relevant portion of the relative position matrix
+            relative_matrix = self.relative_position_matrix[:seq_len, :seq_len]
+            relative_matrix = relative_matrix[attn_mask[:seq_len, :seq_len]]
+            relative_matrix = relative_matrix.unsqueeze(0)  # Add batch dimension
+
+            # Add relative positional matrix to the attention weights
+            attn_weights = attn_weights + relative_matrix
+
+            # Re-normalize attention weights
+            attn_weights = F.softmax(attn_weights, dim=-1)
+
+            # Recompute attention output using updated weights
+            attn_output = torch.matmul(attn_weights, value)
+
+        return attn_output, attn_weights
+
+
+class RelativeTransformerEncoderLayer(nn.TransformerEncoderLayer):
+    def __init__(self, d_model, nhead, dim_feedforward, dropout, batch_first, **kwargs):
+        super().__init__(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
+                         dropout=dropout, batch_first=batch_first, **kwargs)
+        self.self_attn = RelativeMultiheadAttention(d_model, nhead, **kwargs)
+
+    def set_relative_position_matrix(self, matrix):
+        """
+        Pass the relative positional matrix to the attention layer.
+        """
+        self.self_attn.set_relative_position_matrix(matrix)
 
 
 class FixedPositionalEncoding(nn.Module):
@@ -143,20 +195,20 @@ class LearnablePositionalEncoding2D(nn.Module):
         # self.pos_y.weight.needs_projection = True
         # self.stab.weight.needs_projection = True
 
-        self.token_to_x = torch.zeros(d**2 + 1, dtype=torch.long).to(device)
-        self.token_to_y = torch.zeros(d**2 + 1, dtype=torch.long).to(device)
-        self.token_to_stab = torch.zeros(d**2 + 1, dtype=torch.long).to(device)
+        self.token_to_x = torch.zeros(d ** 2 + 1, dtype=torch.long).to(device)
+        self.token_to_y = torch.zeros(d ** 2 + 1, dtype=torch.long).to(device)
+        self.token_to_stab = torch.zeros(d ** 2 + 1, dtype=torch.long).to(device)
 
-        z_idx = 0
-        x_idx = (d ** 2 - 1) // 2
+        z_idx = (d ** 2 - 1) // 2 - 1
+        x_idx = (d ** 2 - 1) - 1
 
-        self.token_to_stab[:x_idx] = 0
-        self.token_to_stab[x_idx:-2] = 1
+        self.token_to_stab[:z_idx] = 0
+        self.token_to_stab[z_idx:-2] = 1
 
         for x in range(2, 2 * d, 4):
             self.token_to_x[x_idx] = x
             self.token_to_y[x_idx] = 0
-            x_idx += 1
+            x_idx -= 1
 
         for y in range(2, 2 * d, 2):
             yi = y % 4
@@ -165,16 +217,16 @@ class LearnablePositionalEncoding2D(nn.Module):
                 if i % 2 == 0:
                     self.token_to_x[z_idx] = x
                     self.token_to_y[z_idx] = y
-                    z_idx += 1
+                    z_idx -= 1
                 elif i % 2 == 1:
                     self.token_to_x[x_idx] = x
                     self.token_to_y[x_idx] = y
-                    x_idx += 1
+                    x_idx -= 1
 
         for x in range(4, 2 * d, 4):
             self.token_to_x[x_idx] = x
             self.token_to_y[x_idx] = 2 * d
-            x_idx += 1
+            x_idx -= 1
 
         self.token_to_x[-2] = d
         self.token_to_y[-2] = d
@@ -191,7 +243,7 @@ class LearnablePositionalEncoding2D(nn.Module):
 
 
 class TraDE(Net):
-    def __init__(self, name, cluster=False, **kwargs):
+    def __init__(self, name, cluster=False, pretraining=False, **kwargs):
         super(TraDE, self).__init__(name, cluster)
         self.n = kwargs['n']
         self.k = kwargs['k']
@@ -204,55 +256,72 @@ class TraDE(Net):
         self.device = kwargs['device']
         self.noise_model = kwargs['noise_model']
 
+        self.pretraining = pretraining
+
         self.fc_in = nn.Embedding(3, self.d_model)
+
         # self.positional_encoding = PositionalEncoding(self.d_model, self.d_model, self.device, self.dropout)
 
-        self.positional_encoding = LearnablePositionalEncoding2D(self.distance, self.d_model, device=self.device)
-        # self.l.weight.needs_projection = True
-
         # Learnable positional encoding produces better results than RNN based encoding
-        '''
+
         if self.noise_model == 'depolarizing':
-            self.positional_encoding = LearnablePositionalEncoding(self.n - 1 + 2 * self.k, self.d_model)
+            # self.positional_encoding = LearnablePositionalEncoding(self.n - 1 + 2 * self.k, self.d_model)
+            self.positional_encoding = LearnablePositionalEncoding2D(self.distance, self.d_model, device=self.device)
+
         else:
             self.positional_encoding = LearnablePositionalEncoding((self.n - 1) // 2 + self.k, self.d_model)
-        
-        self.positional_encoding = FixedPositionalEncoding(self.distance, self.d_model, device=self.device)
-        '''
+
         encoder_layer = nn.TransformerEncoderLayer(d_model=self.d_model,
                                                    nhead=self.n_heads,
                                                    dim_feedforward=self.d_ff,
                                                    dropout=self.dropout,
                                                    batch_first=True)
+        '''
+        encoder_layer = RelativeTransformerEncoderLayer(d_model=self.d_model,
+                                                        nhead=self.n_heads,
+                                                        dim_feedforward=self.d_ff,
+                                                        dropout=self.dropout,
+                                                        batch_first=True)
+        '''
+        # g = DEM_Graph(self.distance, self.no)
+        # encoder_layer.set_relative_position_matrix(g)
+
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=self.n_layers)
+        decoder_layer = nn.TransformerDecoderLayer(d_model=self.d_model,
+                                                   nhead=self.n_heads,
+                                                   dim_feedforward=self.d_ff,
+                                                   dropout=self.dropout,
+                                                   batch_first=True)
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=self.n_layers)
         self.fc_out = nn.Linear(self.d_model, 1)
 
     def forward(self, x):
         x = F.relu(self.fc_in(x))
         x = self.positional_encoding(x)
 
-        seq_len = x.size(1)
-        max_len = self.n - 1 + 2 * self.k
-        '''
-        mask = torch.ones(max_len, max_len)
-        mask = torch.tril(mask, diagonal=0)
-
-        # For subsequent tokens, set diagonal values to 0 to prevent self-attention (except for the start token)
-        mask[1:, 1:] = torch.tril(torch.ones((max_len - 1, max_len - 1)), diagonal=-1)
-        '''
-        mask = torch.zeros(max_len, max_len)
-        mask[:max_len - 2 * self.k + 1, :max_len - 2 * self.k + 1] = torch.ones(max_len - 2 * self.k + 1,
-                                                                                max_len - 2 * self.k + 1)
-        for i in range(2 * self.k):
-            temp = torch.ones(1, max_len)
-            temp[0, max_len - 2 * self.k + 1 + i:] = torch.zeros(1, 2 * self.k - 1 - i)
-            mask[-2 * self.k + i, :] = temp
+        s, l = x[:, :self.distance ** 2 - 1], x[:, self.distance ** 2 - 1:]
+        seq_len = l.size(1)
+        mask = torch.tril(torch.ones((seq_len, seq_len)), diagonal=0)
         mask = mask.masked_fill(mask == 0, float('-inf'))
         mask = mask.masked_fill(mask == 1, 0.0)
+        mask = mask.to(self.device)
 
-        if seq_len < max_len:
-            mask = mask[:seq_len, :seq_len]
+        s = self.encoder(s)
 
+        x = self.decoder(tgt=l, memory=s, tgt_mask=mask)
+
+        x = self.fc_out(x)
+        x = torch.sigmoid(x)
+        return x.squeeze(2)
+
+    def encoder_forward(self, x):
+        x = F.relu(self.fc_in(x))
+        x = self.positional_encoding(x)
+
+        seq_len = (x.size(1))
+        mask = torch.tril(torch.ones((seq_len, seq_len)), diagonal=0)
+        mask = mask.masked_fill(mask == 0, float('-inf'))
+        mask = mask.masked_fill(mask == 1, 0.0)
         mask = mask.to(self.device)
 
         x = self.encoder(x, mask=mask)
@@ -260,23 +329,26 @@ class TraDE(Net):
         x = torch.sigmoid(x)
         return x.squeeze(2)
 
-    def log_prob(self, x, refinement: bool = False):
+    def log_prob(self, x):
         epsilon = 1e-9
+        if self.pretraining:
+            start_token_value = 2
+            start_token = torch.full((x.size(0), 1), start_token_value, dtype=torch.long, device=self.device)
+            x_in = torch.cat((start_token, x[:, :-1]), dim=1).to(self.device)
 
-        # Append start token
-        start_token_value = 2
-        start_token = torch.full((x.size(0), 1), start_token_value, dtype=torch.long, device=self.device)
-        x_in = torch.cat((start_token, x[:, :-1]), dim=1).to(self.device)
-
-        x_hat = self.forward(x_in)
-
-        if refinement:
-            log_prob = torch.log(x_hat[:,-2 * self.k:] + epsilon) * x[:,-2 * self.k:] + torch.log(
-                1 - x_hat[:,-2 * self.k:] + epsilon) * (1 - x[:,-2 * self.k:])
-            sequence_length = 2
-        else:
+            x_hat = self.encoder_forward(x_in)
             log_prob = torch.log(x_hat + epsilon) * x + torch.log(1 - x_hat + epsilon) * (1 - x)
             sequence_length = x.size(1)
+        else:
+            start_token_value = 2
+            start_token = torch.full((x.size(0), 1), start_token_value, dtype=torch.long, device=self.device)
+            x_in = torch.cat((x[:, :self.distance ** 2 - 1], start_token, x[:, -2:-1]), dim=1).to(self.device)
+
+            x_hat = self.forward(x_in)
+
+            log_prob = torch.log(x_hat + epsilon) * x[:, -2 * self.k:] + torch.log(1 - x_hat + epsilon) * (
+                    1 - x[:, -2 * self.k:])
+            sequence_length = 2 * self.k
         return log_prob.sum(dim=1) / sequence_length
 
     def conditioned_forward(self, syndrome, dtype=torch.int, k=1):
@@ -286,7 +358,7 @@ class TraDE(Net):
             # Append start token
             start_token_value = 2
             start_token = torch.full((syndrome.size(0), 1), start_token_value, dtype=torch.long, device=self.device)
-            syndrome = torch.cat((start_token, syndrome), dim=1).to(self.device)
+            syndrome = torch.cat((syndrome, start_token), dim=1).to(self.device)
 
             for i in range(k):  # 2 * * distance removed
                 conditional = self.forward(syndrome)
@@ -316,6 +388,9 @@ class TraDE(Net):
                 samples[:, i] = next_token
 
         return samples
+
+    def set_pretrain(self, pretrain):
+        self.pretraining = pretrain
 
 
 if __name__ == '__main__':

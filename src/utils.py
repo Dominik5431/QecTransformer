@@ -1,6 +1,7 @@
 import os
 
 import numpy as np
+import scipy
 import torch
 import sys
 import time
@@ -319,12 +320,30 @@ def normalize_p(logical_p, syndrome_p, ps, s):
 
 
 # @njit(nogil=True)
-def get_pr(d: int, ps, stabilizer, logical, qubits: int, mode='depolarizing'):
+def get_pr(d: int, ps, stabilizer, logical, qubits: int, mode='depolarizing', approx=None):
+    if approx is None:
+        approx = qubits
+
     errs = np.arange(2 ** (qubits))
     syndrome_p = np.zeros((2 ** (qubits - 1), len(ps)))
     logical_p = np.zeros((2 ** (qubits - 1), 4, len(ps)))
 
     error_x = decimal_to_binary_array(errs, qubits)
+    print(np.shape(error_x))
+    # print(error_x)
+    if approx < qubits:
+        na = 0
+        for i in range(approx + 1):
+            na += int(scipy.special.binom(qubits, i))
+        error_x_2 = np.zeros((na, qubits))
+        idx = 0
+        for i, e in enumerate(error_x):
+            if np.sum(e) <= approx:
+                error_x_2[idx] = error_x[i]
+                idx += 1
+        error_x = error_x_2
+        # print(error_x)
+    print(np.shape(error_x))
     if mode == 'depolarizing':
         error_z = error_x.copy()
     else:
@@ -358,9 +377,9 @@ def get_pr(d: int, ps, stabilizer, logical, qubits: int, mode='depolarizing'):
                             axis=1), axis=0) - 4 / 3
     # result = np.sum(np.sum((logical_p) ** 2, axis=1), axis=0)
     # print(4 / 3 * logical_p - 1 / (2 * np.log(2)) * np.log(logical_p + epsilon) - 4 / 3)
-    print(logical_p[2**6, :, 11])
-    print(syndrome_p[2**6, 11])
-    return pr, ci, dif
+    # print(logical_p[2**6, :, 11])
+    # print(syndrome_p[2**6, 11])
+    return pr, syndrome_p, logical_p
 
 
 if __name__ == '__main__':
@@ -373,29 +392,70 @@ if __name__ == '__main__':
     '''
     for d in [3]:
         g_stabilizer = np.loadtxt('code/stabilizer_' + 'steane' + '_d{}_k{}'.format(d, 1))
-        print(g_stabilizer)
+        # print(g_stabilizer)
         logical_opt = np.loadtxt('code/logical_' + 'steane' + '_d{}_k{}'.format(d, 1))
         n = 7 if d == 3 else 19
         # logical_opt = np.array([[0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1], [1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0]])
-        pr, ci, dif = get_pr(d=d, ps=noises, stabilizer=g_stabilizer, logical=logical_opt, qubits=n, mode='depolarizing')
+        pr, s_p, l_p = get_pr(d=d, ps=noises, stabilizer=g_stabilizer, logical=logical_opt, qubits=n, mode='depolarizing')
         # np.savetxt('analytical_d{}'.format(d), pr)
         # plt.plot(noises, ci / (2 * np.log(2)) + 0.5, label='d={}_entr'.format(d))
         # plt.plot(noises, entropy, label='d={}_entr'.format(d))
         plt.plot(noises, pr, label='d={}_pr'.format(d))
         # plt.plot(noises, dif, label='d={}_dif'.format(d))
         # plt.plot(noises, 4 * var, label='d={}_var'.format(d))
-    '''
+        g_stabilizer = np.loadtxt('code/stabilizer_' + 'steane' + '_d{}_k{}'.format(d, 1))
+        logical_opt = np.loadtxt('code/logical_' + 'steane' + '_d{}_k{}'.format(d, 1))
+
+        pr, s_p, l_p = get_pr(d=d, ps=noises, stabilizer=g_stabilizer, logical=logical_opt, qubits=n,
+                         mode='depolarizing', approx=2)
+
+        plt.plot(noises, pr, label='d={}_pr_approx'.format(d))
+    for d in [5]:
+        n = 7 if d == 3 else 19
+        g_stabilizer = np.loadtxt('code/stabilizer_' + 'steane' + '_d{}_k{}'.format(d, 1))
+        logical_opt = np.loadtxt('code/logical_' + 'steane' + '_d{}_k{}'.format(d, 1))
+
+        pr, s_p, l_p = get_pr(d=d, ps=noises, stabilizer=g_stabilizer, logical=logical_opt, qubits=n,
+                         mode='depolarizing', approx=3)
+
+        plt.plot(noises, pr, label='d={}_pr_approx'.format(d))
+        pr = np.loadtxt("analytical_d5")
+        plt.plot(noises, pr, label='d={}_pr'.format(d))
+
     for d in [3]:
         g_stabilizer = np.loadtxt('code/stabilizer_' + 'rsur' + '_d{}_k{}'.format(d, 1))
         print(g_stabilizer)
         logical_opt = np.loadtxt('code/logical_' + 'rsur' + '_d{}_k{}'.format(d, 1))
-        pr, ci, dif = get_pr(d=d, ps=noises, stabilizer=g_stabilizer, logical=logical_opt, qubits=d**2,
-                             mode='depolarizing')
+        pr, s_p, l_p = get_pr(d=d, ps=noises, stabilizer=g_stabilizer, logical=logical_opt, qubits=d ** 2,
+                         mode='depolarizing')
+        np.savetxt(f's_p_d{d}_surface', s_p)
+        np.savetxt(f'l_p_d{d}_surface', l_p.reshape(l_p.shape[0], -1))
         plt.plot(noises, pr, label='d={}_surface'.format(d))
 
-    plt.vlines(0.109, 0.5, 1, linestyles='dashed', color='red', label='threshold')
+    plt.vlines(0.189, 0.25, 1, linestyles='dashed', color='red', label='threshold')
+    plt.hlines(0.25, 0, 0.4, linestyles='dashed', color='black', linewidth=1)
     plt.legend()
     plt.xlabel('noise probability p')
     plt.ylabel('participation ratio')
     # plt.ylim(0.45, 0.65)
     plt.show()
+    '''
+    d = 3
+    n = -2
+    print(noises[n])
+    s_p_c = np.loadtxt(f's_p_d{d}')
+    l_p_c = np.loadtxt(f'log_p_d{d}')
+    l_p_c = l_p_c.reshape(l_p_c.shape[0], l_p_c.shape[1] // len(noises), len(noises))
+    s_p_s = np.loadtxt(f's_p_d{d}_surface')
+    l_p_s = np.loadtxt(f'l_p_d{d}_surface')
+    l_p_s = l_p_s.reshape(l_p_s.shape[0], l_p_s.shape[1] // len(noises), len(noises))
+    # print((s_p_c[:, 4]))
+    # print((s_p_s[:, 4]))
+    print(np.sum(s_p_c[:, n] * l_p_c[:, 0, n]**2))
+    print(np.sum(s_p_s[:, n] * l_p_s[:, 0, n]**2))
+    print(np.sum(s_p_c[:, n] * l_p_c[:, 1, n]**2))
+    print(np.sum(s_p_s[:, n] * l_p_s[:, 1, n]**2))
+    print(np.sum(s_p_c[:, n] * l_p_c[:, 2, n]**2))
+    print(np.sum(s_p_s[:, n] * l_p_s[:, 2, n]**2))
+    print(np.sum(s_p_c[:, n] * l_p_c[:, 3, n]**2))
+    print(np.sum(s_p_s[:, n] * l_p_s[:, 3, n]**2))

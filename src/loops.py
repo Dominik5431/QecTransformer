@@ -33,15 +33,14 @@ def mmd_loss(x, y, sigma=1.0):
 
 
 def training_loop(model: nn.Module, dataset, val_set, init_optimizer: Callable[[Any], Optimizer], device, epochs=10,
-                  batch_size=100, l=5., mode='depolarizing', refinement: bool = True, activate_scheduler: bool = True,
+                  batch_size=100, l=5., mode='depolarizing', activate_scheduler: bool = True,
                   include_mmd: bool = False):
     train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=True)
     model.to(device)
-    model.train()
 
     optimizer = init_optimizer((model.parameters()))
-    scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=5)
+    scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=4)
 
     best_loss = float("inf")
     previous_loss = float("inf")
@@ -54,11 +53,13 @@ def training_loop(model: nn.Module, dataset, val_set, init_optimizer: Callable[[
         avg_loss = 0
         avg_mmd = 0
         num_batches = 0
+
+        model.train()
         for (batch_idx, batch) in enumerate(tqdm(train_loader)):
             # add start token
             optimizer.zero_grad()
 
-            log_prob = model.log_prob(batch, refinement=refinement)
+            log_prob = model.log_prob(batch)
             if include_mmd:
                 q_samples = model.sample_density()
                 mmd = mmd_loss(q_samples, batch)
@@ -78,11 +79,12 @@ def training_loop(model: nn.Module, dataset, val_set, init_optimizer: Callable[[
         avg_mmd /= num_batches
         print(f"Epoch {epoch + 1}, Loss: {avg_loss}, MMD: {avg_mmd}")
 
+        model.eval()
         with torch.no_grad():
             val_loss = 0
             num_batches = 0
             for (batch_idx, batch) in enumerate(val_loader):
-                log_prob = model.log_prob(batch, refinement=refinement)
+                log_prob = model.log_prob(batch)
                 # output = model(batch)
                 loss = torch.mean((-log_prob), dim=0)
                 # loss = criterion(output, batch.float())
@@ -92,21 +94,19 @@ def training_loop(model: nn.Module, dataset, val_set, init_optimizer: Callable[[
             # if val_loss < best_loss:
             #     best_loss = val_loss
             model.save()
-            if val_loss > previous_loss:
-                counter += 1
-            else:
-                counter = 0
             previous_loss = val_loss
             print(f"Epoch {epoch + 1}, Validation Loss: {val_loss}")
             if activate_scheduler:
                 scheduler.step(val_loss)
                 print(scheduler.get_last_lr())
-            # if counter > 4:
-            #     break
+                if scheduler.get_last_lr()[0] < 2e-8:
+                    counter += 1
+                if counter > 10:
+                    break
     return model
 
 
-def eval_log_op(model, distance, noise, device, num=500, mode='depolarizing'):
+def eval_log_op(model, distance, noise, device, num=10000, mode='depolarizing'):
     model.eval()
     model.to(device)
     if mode == 'depolarizing':
