@@ -1,10 +1,17 @@
 import torch
 import numpy as np
 
+"""
+Defines the used optimizer.
+Uses Adam optimizer in fused mode.
+
+Includes experiments about unitary optimization, based on projUNN. Not used anymore.
+"""
+
 
 def make_optimizer(lr):
-    # return lambda params: torch.optim.Adam(params, lr=lr, weight_decay=1e-5)
-    return lambda params: RMSprop(params, projector, lr=lr, weight_decay=1e-5)
+    return lambda params: torch.optim.Adam(params, lr=lr, weight_decay=1e-5, fused=True)
+    # return lambda params: RMSprop(params, projector, lr=lr, weight_decay=1e-5)
 
 
 def projector(param, update):

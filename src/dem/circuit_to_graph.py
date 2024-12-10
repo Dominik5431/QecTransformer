@@ -3,7 +3,12 @@ import stim
 import torch
 from matplotlib import pyplot as plt
 
+
 class SurfaceCodeCircuit:
+    """
+    Implements the surface code circuit for arbitrary distance.
+    Possible implementations are available for bit-flip noise and depolarizing noise.
+    """
     def __init__(self, distance, noise, noise_model='depolarizing'):
         self.noise_model = noise_model
         self.distance = distance
@@ -157,6 +162,10 @@ class SurfaceCodeCircuit:
 
 
 class DEM_Graph:
+    """
+    Takes the surface code circuit, generates a detector-error model and builds an adjacency matrix
+    that serves for the attention bias.
+    """
     def __init__(self, distance, noise, noise_model):
         circuit = SurfaceCodeCircuit(distance, noise, noise_model).create_code_instance()
         self.distance = distance
@@ -191,12 +200,13 @@ class DEM_Graph:
 
     def get_adjacency_matrix(self):
         node_order = []
-        for i in range(self.distance**2 - 1):
+        for i in range(self.distance ** 2 - 1):
             node_order.append('D{}'.format(i))
         return torch.as_tensor(nx.to_numpy_array(self.graph, nodelist=node_order, weight="weight"))
 
 
 if __name__ == "__main__":
+    # For testing
     graph = DEM_Graph(3, 0.03, 'depolarizing').get_graph()
 
     # Visualize the graph with weights

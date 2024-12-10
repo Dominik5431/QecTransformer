@@ -1,19 +1,25 @@
-import os
-
 import numpy as np
 import scipy
 import torch
 import sys
 import time
-import itertools
 from numba import njit
-from numba_progress import ProgressBar
 
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 
+"""
+Script for analytically calculating the participation ratio and related quantities.
+Uses Numba for translation to machine code and faster execution since we need to loop over 
+2**(d**2-1) possible syndromes.
+Includes some other useful methods such as bootstrap resampling.
+"""
 
-def progressbar(it, prefix="", size=60, out=sys.stdout):  # Python3.6+
+
+def progressbar(it, prefix="", size=60, out=sys.stdout):
+    """
+    Custom progressbar.
+    """
     count = len(it)
     start = time.time()  # time estimate start
 
@@ -69,6 +75,9 @@ def read_code(d, k, seed=0, c_type='sur'):
 
 
 class Loading_code():
+    """
+    Class to load stabilizer and logical operators of any qec code.
+    """
     def __init__(self, info):
         self.g_stabilizer, self.logical_opt, self.pure_es = info[0], info[1], info[2]
         self.n, self.m = self.g_stabilizer.size(1), self.g_stabilizer.size(0)
@@ -324,13 +333,20 @@ def get_pr(d: int, ps, stabilizer, logical, qubits: int, mode='depolarizing', ap
     if approx is None:
         approx = qubits
 
+    # All possible X errors, written as [0, 0, 1] for an X error on qubit 3.
+    # Stored as decimal numbers
     errs = np.arange(2 ** (qubits))
+
+    # Array to save syndrome probabilities
     syndrome_p = np.zeros((2 ** (qubits - 1), len(ps)))
+    # Array to save logical operator probabilities.
     logical_p = np.zeros((2 ** (qubits - 1), 4, len(ps)))
 
     error_x = decimal_to_binary_array(errs, qubits)
     print(np.shape(error_x))
     # print(error_x)
+
+    # Approximation: Considers only error chains that act on up to int(approx) qubits.
     if approx < qubits:
         na = 0
         for i in range(approx + 1):
@@ -345,6 +361,7 @@ def get_pr(d: int, ps, stabilizer, logical, qubits: int, mode='depolarizing', ap
         # print(error_x)
     print(np.shape(error_x))
     if mode == 'depolarizing':
+        # Same z errors as x errors
         error_z = error_x.copy()
     else:
         error_z = np.zeros((1, qubits)).astype(np.float32)
@@ -367,36 +384,44 @@ def get_pr(d: int, ps, stabilizer, logical, qubits: int, mode='depolarizing', ap
     # assert np.sum(np.abs(np.sum(logical_p, axis=1) - np.ones((2 ** (qubits - 1), len(ps))))) < 1e-3
     # assert np.sum(np.abs(np.sum(syndrome_p, axis=0) - np.ones(len(ps)))) < 1e-3
     epsilon = 1e-12
+
+    # Define different quantities that show the phase transition. They are all based on some non-linear function
+    # that is continuous in [0,1].
+
+    # f(x) = x * log(x) --> equal to coherent information. See notes.
     ci = np.log(2) + np.sum(syndrome_p * np.sum((logical_p) * np.log(logical_p + epsilon), axis=1), axis=0)
     entropy = - np.sum(syndrome_p * np.sum((logical_p) * np.log(logical_p + epsilon), axis=1), axis=0)
+
+    # f(x) = x**2 --> participation ratio averaged over different syndromes.
     pr = np.sum(syndrome_p * np.sum((logical_p) ** 2, axis=1), axis=0)
+
+
     var = np.sum(syndrome_p * np.var(logical_p[:, [0, 2], :], axis=1, ddof=0), axis=0)
     # dif = 4/3 * pr - 1/3 - (ci/(2 * np.log(2)) + 0.5)
     dif = np.sum(
         syndrome_p * np.sum(4 / 3 * logical_p ** 2 - 1 / (2 * np.log(2)) * logical_p * np.log(logical_p + epsilon),
                             axis=1), axis=0) - 4 / 3
     # result = np.sum(np.sum((logical_p) ** 2, axis=1), axis=0)
-    # print(4 / 3 * logical_p - 1 / (2 * np.log(2)) * np.log(logical_p + epsilon) - 4 / 3)
-    # print(logical_p[2**6, :, 11])
-    # print(syndrome_p[2**6, 11])
+
     return pr, syndrome_p, logical_p
 
 
 if __name__ == '__main__':
+    # Analytically calculating the participation ratio
 
-    # noises = np.arange(0.08, 0.12, 0.001)
     epsilon = 1e-12
     noises = np.arange(0., 0.4, 0.01)
     # entr = - noises * np.log(noises + epsilon) - (1 - noises) * np.log(1 - noises)
     # plt.plot(noises, (- entr + np.log(2)) / np.log(2), label='d=1')
-    '''
+
     for d in [3]:
         g_stabilizer = np.loadtxt('code/stabilizer_' + 'steane' + '_d{}_k{}'.format(d, 1))
         # print(g_stabilizer)
         logical_opt = np.loadtxt('code/logical_' + 'steane' + '_d{}_k{}'.format(d, 1))
         n = 7 if d == 3 else 19
         # logical_opt = np.array([[0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1], [1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0]])
-        pr, s_p, l_p = get_pr(d=d, ps=noises, stabilizer=g_stabilizer, logical=logical_opt, qubits=n, mode='depolarizing')
+        pr, s_p, l_p = get_pr(d=d, ps=noises, stabilizer=g_stabilizer, logical=logical_opt, qubits=n,
+                              mode='depolarizing')
         # np.savetxt('analytical_d{}'.format(d), pr)
         # plt.plot(noises, ci / (2 * np.log(2)) + 0.5, label='d={}_entr'.format(d))
         # plt.plot(noises, entropy, label='d={}_entr'.format(d))
@@ -407,7 +432,7 @@ if __name__ == '__main__':
         logical_opt = np.loadtxt('code/logical_' + 'steane' + '_d{}_k{}'.format(d, 1))
 
         pr, s_p, l_p = get_pr(d=d, ps=noises, stabilizer=g_stabilizer, logical=logical_opt, qubits=n,
-                         mode='depolarizing', approx=2)
+                              mode='depolarizing', approx=2)
 
         plt.plot(noises, pr, label='d={}_pr_approx'.format(d))
     for d in [5]:
@@ -416,7 +441,7 @@ if __name__ == '__main__':
         logical_opt = np.loadtxt('code/logical_' + 'steane' + '_d{}_k{}'.format(d, 1))
 
         pr, s_p, l_p = get_pr(d=d, ps=noises, stabilizer=g_stabilizer, logical=logical_opt, qubits=n,
-                         mode='depolarizing', approx=3)
+                              mode='depolarizing', approx=3)
 
         plt.plot(noises, pr, label='d={}_pr_approx'.format(d))
         pr = np.loadtxt("analytical_d5")
@@ -427,7 +452,7 @@ if __name__ == '__main__':
         print(g_stabilizer)
         logical_opt = np.loadtxt('code/logical_' + 'rsur' + '_d{}_k{}'.format(d, 1))
         pr, s_p, l_p = get_pr(d=d, ps=noises, stabilizer=g_stabilizer, logical=logical_opt, qubits=d ** 2,
-                         mode='depolarizing')
+                              mode='depolarizing')
         np.savetxt(f's_p_d{d}_surface', s_p)
         np.savetxt(f'l_p_d{d}_surface', l_p.reshape(l_p.shape[0], -1))
         plt.plot(noises, pr, label='d={}_surface'.format(d))
@@ -440,6 +465,7 @@ if __name__ == '__main__':
     # plt.ylim(0.45, 0.65)
     plt.show()
     '''
+    Comparison surface vs. color code with respect to the participation ratio. 
     d = 3
     n = -2
     print(noises[n])
@@ -459,3 +485,4 @@ if __name__ == '__main__':
     print(np.sum(s_p_s[:, n] * l_p_s[:, 2, n]**2))
     print(np.sum(s_p_c[:, n] * l_p_c[:, 3, n]**2))
     print(np.sum(s_p_s[:, n] * l_p_s[:, 3, n]**2))
+    '''

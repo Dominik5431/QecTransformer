@@ -1,11 +1,15 @@
 from abc import ABC, abstractmethod
 import stim
 import numpy as np
-from pathlib import Path
-from random import random
 
 
 class QECCode(ABC):
+    """
+    Abstract base class for error codes.
+    Defines the basis methods create_code_instance() and get_syndromes(n) with n: number of samples.
+    Implements circuit_to_png() to visualize the error correcting circuit.
+    """
+
     def __init__(self, distance, noise):
         self.distance = distance
         self.noise = noise
@@ -28,10 +32,15 @@ class QECCode(ABC):
 
 
 class SurfaceCode(QECCode):
+    """
+    Implementation of the Surface code in the code capacity setting including the measurement of logical operators
+    along the syndromes.
+    Available values for noise_model: depolarizing and bitflip.
+    """
+
     def __init__(self, distance, noise, noise_model='depolarizing'):
         self.noise_model = noise_model
         super().__init__(distance, noise)
-
 
     def measure_all_z(self, coord_to_index, index_to_coordinate, list_z_ancillas_index):
         circuit = stim.Circuit()
@@ -76,22 +85,28 @@ class SurfaceCode(QECCode):
         circuit = stim.Circuit()
 
         # Z_R Z_L stabilizer
-        circuit.append("CNOT", [reference_qubit_index, reference_ancillas_index[0]])
+
         for i in range(Ly):  # Ly):
+            circuit.append("CNOT", [reference_qubit_index, reference_ancillas_index[i]])
+            circuit.append("TICK")
             for xi in range(Lx):
                 x = 2 * xi + 1
-                circuit.append("CNOT", [coord_to_index["({},{})".format(x, 2 * i + 1)], reference_ancillas_index[0]])
-        circuit.append("TICK")
+                circuit.append("CNOT", [coord_to_index["({},{})".format(x, 2 * i + 1)], reference_ancillas_index[i]])
+            circuit.append("TICK")
 
         # X_R X_L stabilizer
-        circuit.append("H", reference_ancillas_index[1])  # 1 instead of Ly + 1
-        circuit.append("CNOT", [reference_ancillas_index[1], reference_qubit_index])
         for i in range(Lx):  # Lx):
+            circuit.append("H", reference_ancillas_index[Ly + i])
+            circuit.append("TICK")
+            circuit.append("CNOT", [reference_ancillas_index[Ly + i], reference_qubit_index])
+            circuit.append("TICK")
             for yi in range(Ly):
                 y = 2 * yi + 1
-                circuit.append("CNOT", [reference_ancillas_index[1], coord_to_index["({},{})".format(2 * i + 1, y)]])
-        circuit.append("H", reference_ancillas_index[1])
-        circuit.append("TICK")
+                circuit.append("CNOT",
+                               [reference_ancillas_index[Ly + i], coord_to_index["({},{})".format(2 * i + 1, y)]])
+                circuit.append("TICK")
+            circuit.append("H", reference_ancillas_index[Ly + i])
+            circuit.append("TICK")
 
         return circuit
 
@@ -168,7 +183,7 @@ class SurfaceCode(QECCode):
 
         reference_ancillas = []
         # logical z reference qubit
-        for i in range(1):  # Ly):
+        for i in range(Ly):
             circuit.append_from_stim_program_text(
                 "QUBIT_COORDS({},{})".format(Lx_ancilla + i, Ly_ancilla - 1) + " {}".format(qubit_idx))
             coord_to_index.update({"({},{})".format(Lx_ancilla + i, Ly_ancilla - 1): qubit_idx})
@@ -177,7 +192,7 @@ class SurfaceCode(QECCode):
             qubit_idx += 1
 
         # logical x reference qubit
-        for i in range(1):  # Lx):
+        for i in range(Lx):
             circuit.append_from_stim_program_text(
                 "QUBIT_COORDS({},{})".format(Lx_ancilla - 1, Ly_ancilla + i) + " {}".format(qubit_idx))
             coord_to_index.update({"({},{})".format(Lx_ancilla - 1, Ly_ancilla + i): qubit_idx})
@@ -221,37 +236,65 @@ class SurfaceCode(QECCode):
         offset = (Lx * Ly - 1) // 2
         r_offset = len(reference_ancillas)
 
+        msmt_schedule = []
+
         for idx, ancilla_qubit_idx in enumerate(list_z_ancillas_index[::-1]):
             coord_x, coord_y = index_to_coordinate[ancilla_qubit_idx]
             circuit.append_from_stim_program_text(
                 "DETECTOR({},{})".format(coord_x, coord_y) + " rec[-{}] rec[-{}]".format(1 + idx + offset + r_offset,
                                                                                          1 + idx + 3 * offset + 2 * r_offset))
+            msmt_schedule.append(1 + idx + offset + r_offset)
 
         for idx, ancilla_qubit_idx in enumerate(list_x_ancillas_index[::-1]):
             coord_x, coord_y = index_to_coordinate[ancilla_qubit_idx]
             circuit.append_from_stim_program_text(
                 "DETECTOR({},{})".format(coord_x, coord_y) + " rec[-{}] rec[-{}]".format(1 + idx + r_offset,
                                                                                          1 + idx + 2 * offset + 2 * r_offset))
+            msmt_schedule.append(1 + idx + r_offset)
 
         for idx, ancilla_qubit_idx in enumerate(reference_ancillas[::-1]):
             coord_x, coord_y = index_to_coordinate[ancilla_qubit_idx]
             circuit.append_from_stim_program_text(
                 "DETECTOR({},{})".format(coord_x, coord_y) + " rec[-{}] rec[-{}]".format(1 + idx,
                                                                                          1 + idx + r_offset + 2 * offset))
+            msmt_schedule.append(1 + idx)
+
+        # Include all measurements
+        rounds = 2
+        for i in np.arange(rounds):
+            for j, idx in enumerate(msmt_schedule):
+                circuit.append_from_stim_program_text(
+                    f"OBSERVABLE_INCLUDE({j + i * (2 * offset + r_offset)})" + f" rec[-{idx + (rounds - 1 - i) * (2 * offset + r_offset)}]")
 
         return circuit
 
     def get_syndromes(self, n, only_syndromes: bool = False):
         sampler = self.circuit.compile_detector_sampler()
-        samples = sampler.sample(shots=n)
+        samples, observables = sampler.sample(shots=n, separate_observables=True)
         samples = np.array(list(map(lambda y: np.where(y, 1, 0), samples)))
-        syndromes = samples
+        measurements = np.array(list(map(lambda y: np.where(y, 1, 0), observables)))
+
+        rounds = np.size(measurements, 1) // np.size(samples, 1)
+        measurement_rounds = np.array_split(measurements, rounds, axis=1)
+        measurement_rounds = [np.expand_dims(arr, axis=-1) for arr in measurement_rounds]
+        measurements_reshaped = np.concatenate(measurement_rounds, axis=-1)
+
         if only_syndromes:
-            return syndromes[:, :-2]  #  * self.distance]
-        return syndromes
+            return (samples[:, :-2 * self.distance],
+                    np.concatenate((measurements[:, :self.distance ** 2 - 1],
+                                    measurements[:, np.size(measurements, 1) // 2:-2 * self.distance])))
+
+        syndromes_exp = np.expand_dims(samples, axis=-1)
+        # measurements_reshaped = np.reshape(measurements,(np.size(syndromes, 0), np.size(syndromes, 1), rounds))
+        return np.concatenate((syndromes_exp, measurements_reshaped), axis=-1)
 
 
 class RepetitionCode(QECCode):
+    """
+    Implementation of the Repetition code in the code capacity setting including the measurement of logical operators
+    along the syndromes.
+    The repetition code is suitable to detect and correct bit-flip errors with a high threshold.
+    """
     def __init__(self, distance, noise):
         super().__init__(distance, noise)
 
@@ -375,6 +418,12 @@ class RepetitionCode(QECCode):
 
 
 if __name__ == '__main__':
-    s = RepetitionCode(3, 0.4)
-    print(s.get_syndromes(3))
+    # For testing:
+    s = SurfaceCode(3, 0.1, noise_model='depolarizing')
+    syndromes = s.get_syndromes(3)
+    events = syndromes[:, :, 0]
+    msmts = syndromes[:, :, 1:]
+    ms1, ms2 = msmts[:, :, 0], msmts[:, :, 1]
+    print(syndromes)
+    assert (ms1 ^ ms2 == events).all()
     s.circuit_to_png()

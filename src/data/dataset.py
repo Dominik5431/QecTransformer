@@ -3,11 +3,14 @@ import numpy as np
 from torch.utils.data import Dataset
 from abc import ABC, abstractmethod
 import logging
-from pathlib import Path
 from src.error_code.error_code import SurfaceCode
 
 
 class QECDataset(Dataset, ABC):
+    """
+    Custom Dataset for QEC data.
+    Upon initialization, the data samples are either generated or loaded.
+    """
     def __init__(self, distance: int, noise, name: str, load: bool, device: torch.device, cluster: bool = False, only_syndromes: bool = False):
         super().__init__()
         self.train = True
@@ -53,6 +56,13 @@ class QECDataset(Dataset, ABC):
 
     @abstractmethod
     def generate_data(self, n, only_syndromes: bool = False):
+        """
+        Method that generates the syndromes. Needs to be implemented by each class that inherits from this class.
+        Detailed implementation depends upon the specific qec code and noise model.
+        :param n: Number of samples to generate.
+        :param only_syndromes: Boolean value. Specifies if only syndromes should be generated or also logical operators. Default False.
+        :return:
+        """
         raise NotImplementedError
 
 
@@ -67,7 +77,6 @@ class DepolarizingSurfaceData(QECDataset):
         return self.syndromes[idx]
 
     def generate_data(self, n, only_syndromes: bool = False):
-        syndromes = []
         c = SurfaceCode(self.distance, self.noise, noise_model='depolarizing')
         syndromes = c.get_syndromes(n, only_syndromes=only_syndromes)
         # data is already provided sequentially as [syndromes, noise]
