@@ -50,7 +50,7 @@ task_dict = {
 }
 
 # task = task_dict['plot logical']
-task = 2
+task = 101
 
 noise_vals = [0.02, 0.05, 0.08, 0.11, 0.14, 0.16, 0.18, 0.20, 0.22, 0.24, 0.27, 0.30, 0.33, 0.36, 0.39]
 distances = [3, 5, 7, 9]

@@ -18,7 +18,7 @@ def get_pr(d: int, noises):
     # generate all possible error configurations
     errs = torch.as_tensor(list(map(list, itertools.product([0, 1], repeat=d))))
 
-    # thnk about second part of parity check matrix
+    # think about second part of parity check matrix
     print(os.getcwd())
     # info = read_code(d=d, k=1, seed=0, c_type='rsur')
     if d == 3:

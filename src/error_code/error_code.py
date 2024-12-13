@@ -280,9 +280,10 @@ class SurfaceCode(QECCode):
         measurements_reshaped = np.concatenate(measurement_rounds, axis=-1)
 
         if only_syndromes:
-            return (samples[:, :-2 * self.distance],
-                    np.concatenate((measurements[:, :self.distance ** 2 - 1],
-                                    measurements[:, np.size(measurements, 1) // 2:-2 * self.distance])))
+            samples = samples[:, :-2 * self.distance]
+            measurements = measurements_reshaped[:, :self.distance ** 2 - 1, :]
+            samples_exp = np.expand_dims(samples, axis=-1)
+            return np.concatenate((samples_exp, measurements), axis=-1)
 
         syndromes_exp = np.expand_dims(samples, axis=-1)
         # measurements_reshaped = np.reshape(measurements,(np.size(syndromes, 0), np.size(syndromes, 1), rounds))
@@ -295,6 +296,7 @@ class RepetitionCode(QECCode):
     along the syndromes.
     The repetition code is suitable to detect and correct bit-flip errors with a high threshold.
     """
+
     def __init__(self, distance, noise):
         super().__init__(distance, noise)
 

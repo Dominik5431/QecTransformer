@@ -107,7 +107,7 @@ def training_loop(model: nn.Module, dataset, val_set, init_optimizer: Callable[[
     return model
 
 
-def eval_log_op(model, distance, noise, device, num=10000, mode='depolarizing'):
+def eval_log_op(model, distance, noise, device, num=10000, batch_size=1000, mode='depolarizing'):
     """
     Evaluates the model by predicting logical operators.
     """
@@ -122,6 +122,7 @@ def eval_log_op(model, distance, noise, device, num=10000, mode='depolarizing'):
                                         only_syndromes=True)
                 .initialize(num))
         # print(data.get_syndromes().size())
+        data_loader = DataLoader(data, batch_size=1000, shuffle=False)
         data_1 = data.get_syndromes()
         if not model.readout == 'conv':
             raise NotImplementedError  # TODO: implement here possibility to test convolutional readout vs. decoder readout
@@ -139,12 +140,16 @@ def eval_log_op(model, distance, noise, device, num=10000, mode='depolarizing'):
         py = pb2_1 * pb1
         p1 = (1 - pb1) * (1 - pb2_0)
         '''
-
-        plog = model.predict_logical(data_1)
-        py = plog[:, 0] * plog[:, 1]
-        px = plog[:, 0] * (1 - plog[:, 1])
-        pz = (1 - plog[:, 0]) * plog[:, 1]
-        p1 = (1 - plog[:, 0]) * (1 - plog[:, 1])
+        py = torch.empty(num, device=device)
+        px = torch.empty(num, device=device)
+        pz = torch.empty(num, device=device)
+        p1 = torch.empty(num, device=device)
+        for batch_idx, batch in enumerate(tqdm(data_loader)):
+            plog = model.predict_logical(batch)
+            py[batch_idx * batch_size: (batch_idx + 1) * batch_size] = plog[:, 0] * plog[:, 1]
+            px[batch_idx * batch_size: (batch_idx + 1) * batch_size] = plog[:, 0] * (1 - plog[:, 1])
+            pz[batch_idx * batch_size: (batch_idx + 1) * batch_size] = (1 - plog[:, 0]) * plog[:, 1]
+            p1[batch_idx * batch_size: (batch_idx + 1) * batch_size] = (1 - plog[:, 0]) * (1 - plog[:, 1])
         # assert (torch.abs(torch.sum(torch.cat((p1, px, pz, py), dim=1), dim=1) - torch.full((px.size(1), 1), 1, device=device)) < 1e-3).all()
 
         result = np.zeros(num)
