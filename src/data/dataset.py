@@ -11,7 +11,7 @@ class QECDataset(Dataset, ABC):
     Custom Dataset for QEC data.
     Upon initialization, the data samples are either generated or loaded.
     """
-    def __init__(self, distance: int, noise, name: str, load: bool, device: torch.device, cluster: bool = False, only_syndromes: bool = False):
+    def __init__(self, distance: int, noise, name: str, load: bool, device: torch.device, cluster: bool = False, only_syndromes: bool = False, logical: str = 'maximal'):
         super().__init__()
         self.train = True
         self.device = device
@@ -22,6 +22,7 @@ class QECDataset(Dataset, ABC):
         self.load_data = load
         self.cluster = cluster
         self.only_syndromes = only_syndromes
+        self.logical = logical
         if not (type(name) is str):
             raise ValueError
 
@@ -67,8 +68,8 @@ class QECDataset(Dataset, ABC):
 
 
 class DepolarizingSurfaceData(QECDataset):
-    def __init__(self, distance: int, noise, name: str, load: bool, device: torch.device, cluster: bool = False, only_syndromes: bool = False):
-        super().__init__(distance, noise, name, load, device, cluster, only_syndromes)
+    def __init__(self, distance: int, noise, name: str, load: bool, device: torch.device, cluster: bool = False, only_syndromes: bool = False, logical: str = 'maximal'):
+        super().__init__(distance, noise, name, load, device, cluster, only_syndromes, logical)
 
     def __len__(self):
         return self.syndromes.size(dim=0)
@@ -77,7 +78,7 @@ class DepolarizingSurfaceData(QECDataset):
         return self.syndromes[idx]
 
     def generate_data(self, n, only_syndromes: bool = False):
-        c = SurfaceCode(self.distance, self.noise, noise_model='depolarizing')
+        c = SurfaceCode(self.distance, self.noise, noise_model='depolarizing', logical=self.logical)
         syndromes = c.get_syndromes(n, only_syndromes=only_syndromes)
         # data is already provided sequentially as [syndromes, noise]
         return torch.as_tensor(np.array(syndromes), device=self.device)
@@ -88,8 +89,8 @@ class DepolarizingSurfaceData(QECDataset):
 
 
 class BitflipSurfaceData(QECDataset):
-    def __init__(self, distance: int, noise, name: str, load: bool, device: torch.device, cluster: bool = False, only_syndromes: bool = False):
-        super().__init__(distance, noise, name, load, device, cluster, only_syndromes)
+    def __init__(self, distance: int, noise, name: str, load: bool, device: torch.device, cluster: bool = False, only_syndromes: bool = False, logical: str = 'maximal'):
+        super().__init__(distance, noise, name, load, device, cluster, only_syndromes, logical)
 
     def __len__(self):
         return self.syndromes.size(dim=0)
@@ -99,7 +100,7 @@ class BitflipSurfaceData(QECDataset):
 
     def generate_data(self, n, only_syndromes: bool = False):
         syndromes = []
-        c = SurfaceCode(self.distance, self.noise, noise_model='bitflip')
+        c = SurfaceCode(self.distance, self.noise, noise_model='bitflip', logical=self.logical)
         syndromes = c.get_syndromes(n, only_syndromes=only_syndromes)
         syndromes = torch.as_tensor(syndromes, device=self.device)
         # print(syndromes[0:4])

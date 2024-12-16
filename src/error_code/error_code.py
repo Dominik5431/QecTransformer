@@ -36,10 +36,15 @@ class SurfaceCode(QECCode):
     Implementation of the Surface code in the code capacity setting including the measurement of logical operators
     along the syndromes.
     Available values for noise_model: depolarizing and bitflip.
+    Available values for logical: maximal and string
     """
 
-    def __init__(self, distance, noise, noise_model='depolarizing'):
+    def __init__(self, distance, noise, noise_model='depolarizing', logical='maximal'):
         self.noise_model = noise_model
+        self.logical = logical
+
+        if self.logical != 'maximal' and self.logical != 'string':
+            raise ValueError("Only 'maximal' or 'string' logical logical are allowed.")
         super().__init__(distance, noise)
 
     def measure_all_z(self, coord_to_index, index_to_coordinate, list_z_ancillas_index):
@@ -86,26 +91,51 @@ class SurfaceCode(QECCode):
 
         # Z_R Z_L stabilizer
 
+        if self.logical == 'maximal':
+            circuit.append("CNOT", [reference_qubit_index, reference_ancillas_index[0]])
+
         for i in range(Ly):  # Ly):
-            circuit.append("CNOT", [reference_qubit_index, reference_ancillas_index[i]])
+            if self.logical == 'string':
+                circuit.append("CNOT", [reference_qubit_index, reference_ancillas_index[i]])
             circuit.append("TICK")
             for xi in range(Lx):
                 x = 2 * xi + 1
-                circuit.append("CNOT", [coord_to_index["({},{})".format(x, 2 * i + 1)], reference_ancillas_index[i]])
+                if self.logical == 'maximal':
+                    circuit.append("CNOT",
+                                   [coord_to_index["({},{})".format(x, 2 * i + 1)], reference_ancillas_index[0]])
+                elif self.logical == 'string':
+                    circuit.append("CNOT",
+                                   [coord_to_index["({},{})".format(x, 2 * i + 1)], reference_ancillas_index[i]])
             circuit.append("TICK")
 
         # X_R X_L stabilizer
-        for i in range(Lx):  # Lx):
-            circuit.append("H", reference_ancillas_index[Ly + i])
+
+        if self.logical == 'maximal':
+            circuit.append("H", reference_ancillas_index[1])
             circuit.append("TICK")
-            circuit.append("CNOT", [reference_ancillas_index[Ly + i], reference_qubit_index])
+            circuit.append("CNOT", [reference_ancillas_index[1], reference_qubit_index])
+
+        for i in range(Lx):  # Lx):
+            if self.logical == 'string':
+                circuit.append("H", reference_ancillas_index[Ly + i])
+                circuit.append("TICK")
+                circuit.append("CNOT", [reference_ancillas_index[Ly + i], reference_qubit_index])
             circuit.append("TICK")
             for yi in range(Ly):
                 y = 2 * yi + 1
-                circuit.append("CNOT",
-                               [reference_ancillas_index[Ly + i], coord_to_index["({},{})".format(2 * i + 1, y)]])
+                if self.logical == 'maximal':
+                    circuit.append("CNOT",
+                                   [reference_ancillas_index[1], coord_to_index["({},{})".format(2 * i + 1, y)]])
+                elif self.logical == 'string':
+                    circuit.append("CNOT",
+                                   [reference_ancillas_index[Ly + i], coord_to_index["({},{})".format(2 * i + 1, y)]])
                 circuit.append("TICK")
-            circuit.append("H", reference_ancillas_index[Ly + i])
+            if self.logical == 'string':
+                circuit.append("H", reference_ancillas_index[Ly + i])
+                circuit.append("TICK")
+
+        if self.logical == 'maximal':
+            circuit.append("H", reference_ancillas_index[1])
             circuit.append("TICK")
 
         return circuit
@@ -183,7 +213,7 @@ class SurfaceCode(QECCode):
 
         reference_ancillas = []
         # logical z reference qubit
-        for i in range(Ly):
+        for i in range(Ly if self.logical == 'string' else 1):
             circuit.append_from_stim_program_text(
                 "QUBIT_COORDS({},{})".format(Lx_ancilla + i, Ly_ancilla - 1) + " {}".format(qubit_idx))
             coord_to_index.update({"({},{})".format(Lx_ancilla + i, Ly_ancilla - 1): qubit_idx})
@@ -192,7 +222,7 @@ class SurfaceCode(QECCode):
             qubit_idx += 1
 
         # logical x reference qubit
-        for i in range(Lx):
+        for i in range(Lx if self.logical == 'string' else 1):
             circuit.append_from_stim_program_text(
                 "QUBIT_COORDS({},{})".format(Lx_ancilla - 1, Ly_ancilla + i) + " {}".format(qubit_idx))
             coord_to_index.update({"({},{})".format(Lx_ancilla - 1, Ly_ancilla + i): qubit_idx})
@@ -280,7 +310,7 @@ class SurfaceCode(QECCode):
         measurements_reshaped = np.concatenate(measurement_rounds, axis=-1)
 
         if only_syndromes:
-            samples = samples[:, :-2 * self.distance]
+            samples = samples[:, :-2 * (self.distance if self.logical == 'string' else 1)]
             measurements = measurements_reshaped[:, :self.distance ** 2 - 1, :]
             samples_exp = np.expand_dims(samples, axis=-1)
             return np.concatenate((samples_exp, measurements), axis=-1)

@@ -39,6 +39,7 @@ import matplotlib.pyplot as plt
 # tf9: zshot for distance 3 test
 
 # ff1: changed readout, closer to google paper proposal
+# ff2: drop convolutional readout, reevaluate with transformer decoder readout
 
 torch.set_printoptions(precision=3, sci_mode=False)
 
@@ -52,21 +53,23 @@ task_dict = {
 # task = task_dict['plot logical']
 task = 101
 
+# torch.manual_seed(42)
+
 noise_vals = [0.02, 0.05, 0.08, 0.11, 0.14, 0.16, 0.18, 0.20, 0.22, 0.24, 0.27, 0.30, 0.33, 0.36, 0.39]
 distances = [3, 5, 7, 9]
 
 # Main script build to use for HPC cluster usage
 # s = sys.argv[1]
-s = 3
+s = 3 + 15
 s = int(s)
 
 noise = noise_vals[s % 15]
 distance = distances[s // 15]
 
 # Hyperparameters
-lr = 1e-3  # 1e-3
+lr = 5e-5  # 1e-4 for d=3
 num_epochs = 150 * (s // 15 + 1)
-batch_size = 1000
+batch_size = 100
 data_size = 200000  # 50000  # 200000  # val data might not be able to show overfitting
 device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
 # device = torch.device('cpu')
@@ -74,9 +77,13 @@ device = torch.device('mps') if torch.backends.mps.is_available() else torch.dev
 iteration = 'ff1'
 mode = 'depolarizing'
 zshot = False
-pretrained_model = 'tf8' + '_' + str(distance - 2) + '_' + str(noise)
+pretrained_model = 'ff1' + '_' + str(distance - 2) + '_' + str(noise)
 load_pretrained = False
 pretraining = False
+logical = 'string'
+readout = 'conv'
+
+assert (logical == 'maximal' and readout == 'transformer-decoder') or (logical == 'string' and readout == 'conv'), f'Invalid combination: logical={logical}, readout={readout}'
 
 n_layers_dict = {3: 3, 5: 3, 7: 3, 9: 3}
 d_model_dict = {3: 256, 5: 256, 7: 256, 9: 256}
@@ -133,7 +140,7 @@ if task == 1:  # Generate samples
     if mode == 'bitflip':
         data = (BitflipSurfaceData(distance=distance,
                                    noise=noise,
-                                   name=iteration + '_' + str(distance) + '_' + str(noise),
+                                   name=f'{iteration}_{distance}_{noise}_{logical}',
                                    load=False,
                                    device=device)
                 .initialize(data_size)
@@ -141,7 +148,7 @@ if task == 1:  # Generate samples
     else:
         data = (DepolarizingSurfaceData(distance=distance,
                                         noise=noise,
-                                        name=iteration + '_' + str(distance) + '_' + str(noise),
+                                        name=f'{iteration}_{distance}_{noise}_{logical}',
                                         load=False,
                                         device=device)
                 .initialize(data_size)
@@ -150,28 +157,28 @@ elif task == 2:  # Training the network
     if mode == 'bitflip':
         data = (BitflipSurfaceData(distance=distance,
                                    noise=noise,
-                                   name=iteration + '_' + str(distance) + '_' + str(noise),
+                                   name=f'{iteration}_{distance}_{noise}_{logical}',
                                    load=True,
                                    device=device)
                 .initialize(data_size))
     else:
         data = (DepolarizingSurfaceData(distance=distance,
                                         noise=noise,
-                                        name=iteration + '_' + str(distance) + '_' + str(noise) + (
+                                        name=f'{iteration}_{distance}_{noise}_{logical}' + (
                                             '_zshot' if zshot else ''),
                                         load=True,
                                         device=device)
                 .initialize(data_size))
     train, val = data.get_train_val_data()  # default ratio 80/20
     try:
-        model = QecTransformer(name=iteration + '_' + str(distance) + '_' + str(noise), **model_dict).load()
+        model = QecTransformer(name=iteration + '_' + str(distance) + '_' + str(noise), readout=readout, **model_dict).load()
     except FileNotFoundError:
         if load_pretrained:
             try:
                 print('Load pretrained model.')
                 # Load weights from pretrained smaller model
                 pretrained_state_dict = torch.load("data/net_{}.pt".format(pretrained_model))
-                model = QecTransformer(name=iteration + '_' + str(distance) + '_' + str(noise), **model_dict)
+                model = QecTransformer(name=iteration + '_' + str(distance) + '_' + str(noise), readout=readout, **model_dict)
                 # Interpolate or copy weights to larger model
                 for name, param in pretrained_state_dict.items():
                     if name in model.state_dict():
@@ -181,14 +188,14 @@ elif task == 2:  # Training the network
                             model.state_dict()[name][:param.size(0), :param.size(1)] = param
             except FileNotFoundError:
                 print('Load new model.')
-                model = QecTransformer(name=iteration + '_' + str(distance) + '_' + str(noise), **model_dict)
+                model = QecTransformer(name=iteration + '_' + str(distance) + '_' + str(noise), readout=readout, **model_dict)
 
         else:
             print('Load new model.')
-            model = QecTransformer(name=iteration + '_' + str(distance) + '_' + str(noise), **model_dict)
+            model = QecTransformer(name=iteration + '_' + str(distance) + '_' + str(noise), readout=readout, **model_dict)
     except RuntimeError:
         print('Load new model.')
-        model = QecTransformer(name=iteration + '_' + str(distance) + '_' + str(noise), **model_dict)
+        model = QecTransformer(name=iteration + '_' + str(distance) + '_' + str(noise), readout=readout, **model_dict)
 
     if pretraining:
         model.set_pretrain(True)
@@ -271,7 +278,7 @@ elif task == 20:  # Refinement training
     raise NotImplementedError
 elif task == 3:  # Evaluate network
     # Get probabilities for logical operators for each noise value in the form: dict{noise: p(1), p(X), p(Z), p(Y)}
-    model = QecTransformer(name=iteration + '_' + str(distance) + '_' + str(noise), **model_dict).load()
+    model = QecTransformer(name=iteration + '_' + str(distance) + '_' + str(noise), readout=readout, **model_dict).load()
     res_data = {noise: eval_log_op(model, distance, noise, device, mode=mode)}
     result = {noise: simple_bootstrap(res_data[noise])}
     torch.save(res_data, "data/data_{0}_{1}_{2}.pt".format(iteration, distance, noise))

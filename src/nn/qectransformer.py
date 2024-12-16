@@ -19,6 +19,7 @@ class Net(nn.Module):
     Implements custom save(), load() and load_smaller_d(name),
     where some of the weights from a smaller distance are reused.
     """
+
     def __init__(self, name: str, cluster: bool = False):
         super(Net, self).__init__()
         self.name = name
@@ -40,6 +41,7 @@ class BiasMultiheadAttention(nn.MultiheadAttention):
     """
     Custom Multihead Attention that allows to add a bias to the attention weights.
     """
+
     def __init__(self, embed_dim, num_heads, **kwargs):
         super().__init__(embed_dim, num_heads, **kwargs)
         self.attention_bias = None
@@ -93,6 +95,7 @@ class QecTransformerEncoderLayer(nn.TransformerEncoderLayer):
     Custom Transformer Encoder Layer.
     Includes BiasMultiheadAttention, diluted convolutions and a learnable padding when scattering the data to 2d.
     """
+
     def __init__(self, d_model, nhead, dim_feedforward, dropout: float, batch_first, scatter_indices, **kwargs):
         super().__init__(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward,
                          dropout=dropout, batch_first=batch_first, **kwargs)
@@ -125,23 +128,36 @@ class QecTransformerEncoderLayer(nn.TransformerEncoderLayer):
                 src_mask: Optional[Tensor] = None,
                 src_key_padding_mask: Optional[Tensor] = None,
                 is_causal: bool = False) -> Tensor:
+        # torch.mps.synchronize()
+        # t1 = time.time()
         src = super().forward(src, src_mask, src_key_padding_mask, is_causal)
+        # torch.mps.synchronize()
+        # t2 = time.time()
+        # print(f'Attention time: {t2 - t1}.6f s')
         src = self._conv_block(src)
         return src
 
     def _conv_block(self, src: Tensor) -> Tensor:
         d = int(math.sqrt(src.size(1) + 1))
+
+        # torch.mps.synchronize()
+        # t0 = time.time()
         src = scatter_to_2d(src, scatter_positions=self.scatter_indices, padding=self.no_stab, d=d, device=src.device)
 
         src = src.permute(0, 3, 1, 2)
+
         c1 = F.relu(self.conv1(src))
         c2 = F.relu(self.conv2(src))
         c3 = F.relu(self.conv3(src))
 
         src = 0.5 * (src + c1 + c2 + c3)
+
         src = src.permute(0, 2, 3, 1)
 
         src = collect_from_2d(src, d=d, device=src.device, scatter_positions=self.scatter_indices)
+        # torch.mps.synchronize()
+        # total_conv = time.time() - t0
+        # print(f'Total conv time: {total_conv}')
         return src
 
 
@@ -165,8 +181,13 @@ class QecTransformerEncoder(nn.Module):
 
     def forward(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False):
         # Pass input through each encoder layer
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
+            # torch.mps.synchronize()
+            # start = time.time()
             src = layer(src, src_mask=src_mask, src_key_padding_mask=src_key_padding_mask, is_causal=is_causal)
+            # torch.mps.synchronize()
+            # end = time.time() - start
+            # print(f'layer {i} time: {end}.6f s')
         return src
 
 
@@ -174,6 +195,7 @@ class LearnablePositionalEncoding(nn.Module):
     """
     1D positional encoding. Deprecated since not well scalable for higher distances.
     """
+
     def __init__(self, n, d_model):
         # put n here as max_seq_len
         super().__init__()
@@ -187,6 +209,7 @@ class LearnablePositionalEncoding2D(nn.Module):
     """
     Positional Encoding that respects the 2D structure of the input data.
     """
+
     def __init__(self, d, d_model, device):  # have also k here, in case for codes with more than 1 logical qubits
         super().__init__()
         self.pos_x = nn.Embedding(2 * d + 1, d_model).to(device)
@@ -276,6 +299,7 @@ class QecTransformer(Net):
     """
     Model to estimate the probability of a logical operator given the syndromes. Effectively realizes a neural network decoder.
     """
+
     def __init__(self, name, cluster=False, pretraining=False, rounds=2, readout='conv', **kwargs):
         super(QecTransformer, self).__init__(name, cluster)
 
@@ -296,8 +320,9 @@ class QecTransformer(Net):
         self.pretraining = pretraining
 
         # Building the input representation
-        self.event_embedding = nn.Embedding(2, self.d_model)
-        self.msmt_embedding = nn.Embedding(4, self.d_model)
+        self.event_embedding = nn.Embedding(2 if readout == 'conv' else 3,
+                                            self.d_model)  # +1 for start token embedding, used when readout=='transformer-decoder'
+        self.msmt_embedding = nn.Embedding(4 if readout == 'conv' else 5, self.d_model)
         self.positional_encoding = LearnablePositionalEncoding2D(self.distance, self.d_model, device=self.device)
 
         # Residual network to map to the input representation
@@ -309,11 +334,11 @@ class QecTransformer(Net):
         # Attention bias
         self._precompute_scatter_indices()
         encoder_layer = QecTransformerEncoderLayer(d_model=self.d_model,
-                                                        nhead=self.n_heads,
-                                                        dim_feedforward=self.d_ff,
-                                                        dropout=self.dropout,
-                                                        batch_first=True,
-                                                        scatter_indices=self.scatter_indices)
+                                                   nhead=self.n_heads,
+                                                   dim_feedforward=self.d_ff,
+                                                   dropout=self.dropout,
+                                                   batch_first=True,
+                                                   scatter_indices=self.scatter_indices)
 
         g = DEM_Graph(self.distance, 0.01, 'depolarizing').get_adjacency_matrix()
         g = (g / torch.min(g[torch.nonzero(g, as_tuple=True)]))
@@ -340,6 +365,7 @@ class QecTransformer(Net):
 
         # Readout network. Current standard: Convolutional readout network.
         if readout == 'transformer-decoder':
+            self.log_pos = LearnablePositionalEncoding(2, self.d_model)  # logical positional encoding
             decoder_layer = nn.TransformerDecoderLayer(d_model=self.d_model,
                                                        nhead=self.n_heads,
                                                        dim_feedforward=self.d_ff,
@@ -410,6 +436,13 @@ class QecTransformer(Net):
         x = event + msmt + position
         return x
 
+    def logical_input_repr(self, x):
+        event = self.event_embedding(x[:, :, 0])
+        msmt = self.msmt_embedding(x[:, :, 1] * 2 + x[:, :, 2])  # converting binary measurements to decimal values
+        position = self.log_pos(x[:, :, 0])
+        x = event + msmt + position
+        return x
+
     def res_net(self, x, scaling_factor=1 / math.sqrt(2)):
         identity = x
 
@@ -421,29 +454,53 @@ class QecTransformer(Net):
 
         return out
 
-    def decode(self, x: torch.Tensor) -> torch.Tensor:
-        x = scatter_to_2d(x, scatter_positions=self.scatter_indices, d=self.distance, padding=torch.zeros(self.d_model),
-                          device=self.device)
+    def decode(self, x: torch.Tensor, *args) -> torch.Tensor:
+        if self.readout == 'conv':
+            x = scatter_to_2d(x, scatter_positions=self.scatter_indices, d=self.distance,
+                              padding=torch.zeros(self.d_model),
+                              device=self.device)
 
-        x = self.conv_to_data(x.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
+            x = self.conv_to_data(x.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
 
-        proj = torch.cat((torch.mean(x, dim=1), torch.mean(x, dim=2)), dim=1)
+            proj = torch.cat((torch.mean(x, dim=1), torch.mean(x, dim=2)), dim=1)
 
-        identity = proj
-        out = identity + F.relu(self.linear_readout(proj))
+            identity = proj
+            out = identity + F.relu(self.linear_readout(proj))
+        else:
+            log = args[0]
+            seq_len = log.size(1)
+            mask = torch.tril(torch.ones((seq_len, seq_len)), diagonal=0)
+            mask = mask.masked_fill(mask == 0, float('-inf'))
+            mask = mask.masked_fill(mask == 1, 0.0)
+            mask = mask.to(self.device)
 
+            out = self.decoder(tgt=log, memory=x, tgt_mask=mask)
         return out
 
-    def forward(self, x):
+    def forward(self, x, *args):
+        # Prepare syndrome input
         x = self.input_repr(x)
         x = self.res_net(x)
 
         # No mask, all-to-all attention between syndromes
         # No decoding history --> solely x as input, no decoding state being added
 
+        # torch.mps.synchronize()
+        # t0 = time.time()
         x = self.encoder(x)
+        # encoder_t = time.time() - t0
+        # print(f'Encoder time: {encoder_t:.6f}s')
 
-        x = self.decode(x)
+        if args:
+            log = args[0]
+
+            # Prepare logical input
+            log = self.logical_input_repr(log)
+            log = self.res_net(log)
+
+            x = self.decode(x, log)
+        else:
+            x = self.decode(x)
 
         x = self.fc_out(x)
         x = torch.sigmoid(x)
@@ -451,6 +508,7 @@ class QecTransformer(Net):
         return x.squeeze(2)
 
     def encoder_forward(self, x):
+        # Prepare syndrome input
         x = self.input_repr(x)
         x = self.res_net(x)
 
@@ -481,13 +539,23 @@ class QecTransformer(Net):
             # don't use start token, start next stabilizer prediction from second stabilizer on
             # loss only calculated on prediction of stabilizers 2 to n-k.
             x_hat = self.encoder_forward(x)
-            log_prob = torch.log(x_hat[:, 2:] + epsilon) * x[:, 2:] + torch.log(1 - x_hat[:, 2:] + epsilon) * (1 - x[:, 2:])
+            log_prob = torch.log(x_hat[:, 2:] + epsilon) * x[:, 2:] + torch.log(1 - x_hat[:, 2:] + epsilon) * (
+                    1 - x[:, 2:])
             sequence_length = x.size(1) - 1
         else:
-            x_in = x[:, :self.distance ** 2 - 1, :]
-            logical = x[:, self.distance ** 2 - 1:, 0]
+            syndrome = x[:, :self.distance ** 2 - 1, :]
+            logical = x[:, self.distance ** 2 - 1:, 0]  # target tokens
 
-            x_hat = self.forward(x_in)
+            if self.readout == 'transformer-decoder':
+                # Start token for transformer-decoder necessary:
+                start_token_value = 2
+                start_token = torch.full((x.size(0), 1, x.size(2)), start_token_value, dtype=torch.long,
+                                         device=self.device)
+                logical_in = torch.cat((start_token, x[:, self.distance ** 2 - 1:-1, :]), dim=1).to(self.device)
+
+                x_hat = self.forward(syndrome, logical_in)
+            else:
+                x_hat = self.forward(syndrome)
 
             log_prob = torch.log(x_hat + epsilon) * logical + torch.log(1 - x_hat + epsilon) * (
                     1 - logical)
@@ -504,10 +572,16 @@ class QecTransformer(Net):
         """
         with torch.no_grad():
             if self.readout == 'transformer-decoder':
-                logical = torch.zeros(syndrome.size(0), 2 * self.distance).to(self.device)
+                logical = torch.zeros(syndrome.size(0), 1).to(self.device)
 
-                for i in range(2 * self.distance):
-                    conditional = self.forward(syndrome)
+                start_token_value = 2
+                start_token = torch.full((syndrome.size(0), 1, syndrome.size(2)), start_token_value, dtype=torch.long,
+                                         device=self.device)
+                logical_in = torch.cat((start_token, syndrome[:, self.distance ** 2 - 1:-1, :]), dim=1).to(self.device)
+
+                syndrome = syndrome[:, :self.distance ** 2 - 1, :]
+                for i in range(1):
+                    conditional = self.forward(syndrome, logical_in)
                     # conditional = torch.sigmoid(logits)
                     if len(conditional.shape) < 2:
                         conditional = conditional.unsqueeze(0)
@@ -518,7 +592,7 @@ class QecTransformer(Net):
                     # x[:, s + i] = conditional[:, s + i]
             elif self.readout == 'conv':
                 logical = self.forward(syndrome).to(self.device)
-        return logical
+        return logical.squeeze()
 
     def set_pretrain(self, pretrain):
         """
@@ -548,7 +622,8 @@ if __name__ == '__main__':
         [[0.1, 0.2, 0.3], [1.1, 0.2, 3.3], [0.1, 5.2, 0.3], [3.1, 0.2, 0.3], [0.4, 0.2, 9.3], [0.1, 0.2, 0.03],
          [0.11, 0.2, 0.3], [0.51, 0.28, 0.3]])
     s = torch.unsqueeze(s, 0)
-    s_2d = scatter_to_2d(s, scatter_positions=model.scatter_indices, padding=torch.tensor([0., 0., 0.]), d=3, device='cpu')
+    s_2d = scatter_to_2d(s, scatter_positions=model.scatter_indices, padding=torch.tensor([0., 0., 0.]), d=3,
+                         device='cpu')
     print(s_2d)
     s_recon = collect_from_2d(s_2d, d=3, device='cpu', scatter_positions=model.scatter_indices)
     print(s_recon)
